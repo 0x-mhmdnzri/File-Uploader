@@ -14,8 +14,8 @@ window.uploaderInit = function(apiBase) {
         progressBar.textContent = percent + "%";
     }
 
-    const CHUNK_SIZE = 0 * 1024 * 1024; // 16 MB
-    const MAX_WORKERS = Math.min(Math.floor(navigator.hardwareConcurrency / 2), 16);
+    const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB
+    const MAX_WORKERS = Math.min(Math.floor(navigator.hardwareConcurrency / 2), 6);
 
     async function initiate(file) {
         const fd = new FormData();

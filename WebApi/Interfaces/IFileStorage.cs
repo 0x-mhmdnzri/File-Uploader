@@ -1,4 +1,4 @@
-namespace WebApi.Storages;
+namespace WebApi.Interfaces;
 
 public interface IFileStorage
 {
