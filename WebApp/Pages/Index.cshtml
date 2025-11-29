@@ -1,0 +1,51 @@
+﻿@page
+@model IndexModel
+@{
+    ViewData["Title"] = "Home page";
+}
+
+<div class="text-center">
+    <h1 class="display-4">Welcome</h1>
+    <p>Learn about <a href="https://learn.microsoft.com/aspnet/core">building Web apps with ASP.NET Core</a>.</p>
+</div>
+
+<input type="file" id="file" class="form-control mb-3" />
+
+<button id="start" class="btn btn-primary mb-3">Start Upload</button>
+
+
+
+
+
+<div class="progress" style="height: 30px;">
+    <div id="progress-bar"
+         class="progress-bar progress-bar-striped progress-bar-animated bg-success"
+         role="progressbar"
+         style="width: 0%;"
+         aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+        0%
+    </div>
+</div>
+
+
+
+@section Scripts {
+
+    <script src="~/js/upload.js"></script>
+
+    <script>
+        const apiBase = '@Model.ApiBase';
+        console.log("[RAZOR] apiBase:", apiBase);
+
+        // برای مطمئن شدن از لود فایل
+        console.log("[RAZOR] uploaderInit:", window.uploaderInit);
+
+        window.addEventListener("DOMContentLoaded", () => {
+            console.log("[RAZOR] DOM loaded, calling uploaderInit");
+            if (window.uploaderInit) window.uploaderInit(apiBase);
+            else console.error("uploaderInit NOT FOUND after DOM load");
+        });
+    </script>
+}
+
+  
