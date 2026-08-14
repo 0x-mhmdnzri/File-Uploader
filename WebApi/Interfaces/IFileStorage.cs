@@ -23,4 +23,10 @@ public interface IFileStorage
     Task<string> GetTempFolderAsync(Guid uploadId);
 
     Task<bool> ChunkExistsAsync(Guid uploadId, int chunkIndex);
+
+    /// <summary>
+    /// Returns the set of chunk indexes that actually exist on disk for this upload.
+    /// This is the source of truth under concurrent parallel uploads.
+    /// </summary>
+    Task<IReadOnlyCollection<int>> GetExistingChunkIndexesAsync(Guid uploadId, CancellationToken ct = default);
 }
