@@ -102,6 +102,8 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
+        // Best-effort update of the CSV for status/resume UI.
+        // Under high concurrency this can lose updates; CompleteAsync uses the filesystem as source of truth.
         session.MarkChunkReceived(chunkIndex);
         await _repo.UpdateAsync(session, ct);
         _metrics.RecordChunkUploaded();
@@ -121,12 +123,26 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
-        var received = session.GetReceivedChunks();
-        if (received.Count != session.TotalChunks)
+        // Disk is the source of truth. Parallel MarkChunkReceivedAsync calls race on ReceivedChunksCsv
+        // and can under-count; the part files themselves are written independently and are reliable.
+        var onDisk = await _storage.GetExistingChunkIndexesAsync(uploadId, ct);
+        var receivedCount = onDisk.Count;
+
+        if (receivedCount != session.TotalChunks)
         {
+            // Also surface which indexes are missing to help debugging / client resume.
+            var missing = Enumerable.Range(0, session.TotalChunks)
+                .Where(i => !onDisk.Contains(i))
+                .Take(20)
+                .ToArray();
+
             throw new InvalidOperationException(
-                $"Not all chunks received. Expected {session.TotalChunks}, got {received.Count}");
+                $"Not all chunks received. Expected {session.TotalChunks}, got {receivedCount} on disk. " +
+                $"Missing (sample): [{string.Join(", ", missing)}]");
         }
+
+        // Keep CSV in sync for status endpoint consumers.
+        session.ReceivedChunksCsv = string.Join(',', onDisk.OrderBy(x => x));
 
         var expectedChecksum = NormalizeChecksum(checksum) ?? session.Checksum;
 
