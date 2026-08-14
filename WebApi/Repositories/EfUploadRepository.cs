@@ -54,4 +54,34 @@ public class EfUploadRepository : IUploadRepository
                  && x.ExpiresAt > now,
             ct);
     }
+
+    public async Task<long> SumCompletedBytesAsync(CancellationToken ct = default)
+    {
+        return await _db.UploadSessions
+            .Where(x => x.Status == UploadStatus.Completed)
+            .SumAsync(x => (long?)x.TotalSize, ct) ?? 0L;
+    }
+
+    public async Task<long> SumCompletedBytesByIpAsync(string clientIp, CancellationToken ct = default)
+    {
+        return await _db.UploadSessions
+            .Where(x => x.Status == UploadStatus.Completed && x.ClientIp == clientIp)
+            .SumAsync(x => (long?)x.TotalSize, ct) ?? 0L;
+    }
+
+    public async Task<long> SumActivePendingBytesAsync(CancellationToken ct = default)
+    {
+        var now = DateTime.UtcNow;
+        return await _db.UploadSessions
+            .Where(x => x.Status == UploadStatus.Pending && x.ExpiresAt > now)
+            .SumAsync(x => (long?)x.TotalSize, ct) ?? 0L;
+    }
+
+    public async Task<long> SumActivePendingBytesByIpAsync(string clientIp, CancellationToken ct = default)
+    {
+        var now = DateTime.UtcNow;
+        return await _db.UploadSessions
+            .Where(x => x.Status == UploadStatus.Pending && x.ExpiresAt > now && x.ClientIp == clientIp)
+            .SumAsync(x => (long?)x.TotalSize, ct) ?? 0L;
+    }
 }
