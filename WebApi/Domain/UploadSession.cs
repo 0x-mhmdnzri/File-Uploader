@@ -1,12 +1,5 @@
 namespace WebApi.Domain;
 
-public enum UploadStatus
-{
-    Pending,
-    Completed,
-    Expired,
-    Failed
-}
 
 public class UploadSession
 {
