@@ -18,6 +18,7 @@ public class UploadController : ControllerBase
 
     /// <summary>
     /// Start a new chunked upload session.
+    /// Optional: pass checksum (hex SHA-256) to be verified after merge.
     /// </summary>
     [HttpPost("initiate")]
     public async Task<IActionResult> Initiate(
@@ -25,9 +26,10 @@ public class UploadController : ControllerBase
         [FromForm] long totalSize,
         [FromForm] int chunkSize = 16_777_216,
         [FromForm] string? contentType = null,
+        [FromForm] string? checksum = null,
         CancellationToken ct = default)
     {
-        var session = await _service.InitiateAsync(fileName, totalSize, chunkSize, contentType, ct);
+        var session = await _service.InitiateAsync(fileName, totalSize, chunkSize, contentType, checksum, ct);
 
         return Ok(new
         {
@@ -42,7 +44,7 @@ public class UploadController : ControllerBase
     /// Upload a single chunk.
     /// </summary>
     [HttpPut("{uploadId:guid}/chunk/{index:int}")]
-    [RequestSizeLimit(100_000_000)] // 100 MB safety limit per request
+    [RequestSizeLimit(100_000_000)]
     public async Task<IActionResult> UploadChunk(
         [FromRoute] Guid uploadId,
         [FromRoute] int index,
@@ -54,14 +56,31 @@ public class UploadController : ControllerBase
     }
 
     /// <summary>
-    /// Finalize the upload: merge chunks and mark as Completed.
+    /// Finalize the upload: merge chunks, optionally verify checksum, mark Completed.
+    /// Body (optional JSON): { "checksum": "abc..." }
+    /// Or form field: checksum
     /// </summary>
     [HttpPost("{uploadId:guid}/complete")]
     public async Task<IActionResult> Complete(
         [FromRoute] Guid uploadId,
+        [FromForm] string? checksum = null,
         CancellationToken ct = default)
     {
-        var finalPath = await _service.CompleteAsync(uploadId, ct);
+        // Also accept JSON body for convenience
+        if (checksum is null && Request.HasJsonContentType())
+        {
+            try
+            {
+                var body = await Request.ReadFromJsonAsync<CompleteRequest>(cancellationToken: ct);
+                checksum = body?.Checksum;
+            }
+            catch
+            {
+                // ignore malformed json; checksum stays null
+            }
+        }
+
+        var finalPath = await _service.CompleteAsync(uploadId, checksum, ct);
         return Ok(new { path = finalPath });
     }
 
@@ -102,10 +121,16 @@ public class UploadController : ControllerBase
             status = session.Status.ToString(),
             received,
             receivedCount = received.Length,
+            session.Checksum,
             session.CreatedAt,
             session.CompletedAt,
             session.ExpiresAt,
             isExpired = session.IsExpired()
         });
+    }
+
+    private sealed class CompleteRequest
+    {
+        public string? Checksum { get; set; }
     }
 }

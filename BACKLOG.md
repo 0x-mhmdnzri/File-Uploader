@@ -20,12 +20,12 @@
 - [x] **Orphan Cleanup BackgroundService**
 - [x] **Abort / Cancel endpoint**
 - [x] **مدیریت نام فایل تکراری**
+- [x] **Checksum (SHA-256) verification**
 
 ### مشکلات و محدودیت‌های باقی‌مانده
 
 | مشکل | توضیح |
 |------|--------|
-| **عدم وجود Checksum** | صحت فایل نهایی هنوز تأیید نمی‌شود |
 | **عدم وجود Auth** | هر کسی می‌تواند آپلود کند |
 | **محدودیت حجم/نوع فایل** | هنوز enforce نشده |
 | **Resume کامل در کلاینت** | localStorage اضافه شده ولی UI کامل نیست |
@@ -43,6 +43,7 @@
 | **وضعیت فایل** | دو مرحله‌ای: `Pending` → `Completed` | مدیریت Orphan |
 | **پاکسازی** | Background Job + TTL | جلوگیری از پر شدن دیسک |
 | **Repository** | EF Core + SQLite (قابل تعویض با PostgreSQL) | Production-ready |
+| **Checksum** | SHA-256 (اختیاری از سمت کلاینت) | تعادل خوب بین امنیت و عملکرد |
 
 ---
 
@@ -75,9 +76,9 @@
 ### 🟠 اولویت ۲ — High (کیفیت و قابلیت اطمینان)
 
 #### 2.1 — اضافه کردن Checksum
-- [ ] کلاینت بتواند hash کل فایل (مثلاً SHA-256) را بفرستد
-- [ ] سرور بعد از merge، hash فایل نهایی را محاسبه و مقایسه کند
-- [ ] در صورت عدم تطابق، وضعیت به `Failed` تغییر کند و فایل حذف شود
+- [x] کلاینت بتواند hash کل فایل (SHA-256) را بفرستد
+- [x] سرور بعد از merge، hash فایل نهایی را محاسبه و مقایسه کند
+- [x] در صورت عدم تطابق، وضعیت به `Failed` تغییر کند و فایل حذف شود
 
 #### 2.2 — پشتیبانی از Abort / Cancel
 - [x] endpoint: `DELETE /api/uploads/{id}`
@@ -121,6 +122,8 @@
 - [ ] پشتیبانی از HTTP/3
 - [ ] Distributed Upload (چند نود)
 - [ ] Virus Scanning بعد از complete
+- [ ] **GPU-accelerated hashing** — استفاده از GPU (مثلاً با CUDA / OpenCL یا کتابخانه‌های .NET مرتبط) برای محاسبه سریع‌تر hash روی فایل‌های خیلی حجیم
+- [ ] **Brotli / Deflate per-chunk compression** — فشرده‌سازی هر چانک در کلاینت و decompress در سرور برای کاهش ترافیک شبکه (با trade-off روی CPU)
 
 ---
 
@@ -136,7 +139,8 @@ dotnet run
 - فایل‌های موقت در پوشه `temp/` و فایل‌های نهایی در `uploads/` ذخیره می‌شوند.
 - Cleanup Job هر ۶۰ دقیقه (در Development هر ۱۰ دقیقه) اجرا می‌شود.
 - TTL پیش‌فرض sessionهای Pending: ۲۴ ساعت (در Development: ۲ ساعت).
+- Checksum: کلاینت می‌تواند `checksum` (hex SHA-256) را در `complete` بفرستد؛ سرور بعد از merge آن را verify می‌کند.
 
 ---
 
-*آخرین به‌روزرسانی: پیاده‌سازی کامل اولویت Critical.*
+*آخرین به‌روزرسانی: پیاده‌سازی Checksum + افزودن GPU hashing و per-chunk compression به Future.*

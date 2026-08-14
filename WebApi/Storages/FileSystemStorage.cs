@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Microsoft.Extensions.Options;
 using WebApi.Interfaces;
 
@@ -43,7 +44,6 @@ public class FileSystemStorage : IFileStorage
         var folder = Path.Combine(_options.TempPath, uploadId.ToString());
         Directory.CreateDirectory(_options.FinalPath);
 
-        // Avoid name collisions by prefixing with uploadId if needed
         var safeName = Path.GetFileName(fileName);
         var finalPath = Path.Combine(_options.FinalPath, safeName);
 
@@ -54,7 +54,6 @@ public class FileSystemStorage : IFileStorage
             finalPath = Path.Combine(_options.FinalPath, $"{nameWithoutExt}_{uploadId:N}{ext}");
         }
 
-        // Sequential stream merge – fastest and safest pattern
         await using (var finalFs = new FileStream(
                          finalPath,
                          FileMode.Create,
@@ -85,10 +84,23 @@ public class FileSystemStorage : IFileStorage
             await finalFs.FlushAsync(ct);
         }
 
-        // Clean temp folder only after successful merge
         await DeleteTempFolderAsync(uploadId, ct);
 
         return finalPath;
+    }
+
+    public async Task<string> ComputeSha256Async(string filePath, CancellationToken ct = default)
+    {
+        await using var fs = new FileStream(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: BufferSize,
+            useAsync: true);
+
+        var hash = await SHA256.HashDataAsync(fs, ct);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     public Task DeleteTempFolderAsync(Guid uploadId, CancellationToken ct = default)

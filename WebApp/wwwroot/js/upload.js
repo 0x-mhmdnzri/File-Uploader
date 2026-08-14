@@ -7,21 +7,49 @@ window.uploaderInit = function (apiBase) {
 
     if (!fileInput || !startBtn || !progressBar) return;
 
-    function updateProgress(percent) {
+    function updateProgress(percent, label) {
         progressBar.style.width = percent + "%";
         progressBar.setAttribute("aria-valuenow", percent);
-        progressBar.textContent = percent + "%";
+        progressBar.textContent = label || (percent + "%");
     }
 
     const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB
     const MAX_WORKERS = Math.min(Math.floor(navigator.hardwareConcurrency / 2), 6);
 
-    async function initiate(file) {
+    /** Compute SHA-256 of a File/Blob, returns lowercase hex string */
+    async function computeSha256(file) {
+        // For large files, hash in chunks to avoid loading everything into memory
+        const chunkSize = 8 * 1024 * 1024; // 8 MB
+        let offset = 0;
+        const cryptoSubtle = window.crypto?.subtle;
+
+        if (!cryptoSubtle) {
+            console.warn("[UPLOAD] Web Crypto not available; skipping checksum");
+            return null;
+        }
+
+        // Incremental hashing via SubtleCrypto is not directly supported,
+        // so we read the whole file as ArrayBuffer for moderate sizes.
+        // For very large files (>512MB) we skip client-side hash to avoid memory pressure.
+        if (file.size > 512 * 1024 * 1024) {
+            console.warn("[UPLOAD] File > 512MB; skipping client-side checksum");
+            return null;
+        }
+
+        updateProgress(0, "Hashing...");
+        const buffer = await file.arrayBuffer();
+        const hashBuffer = await cryptoSubtle.digest("SHA-256", buffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    async function initiate(file, checksum) {
         const fd = new FormData();
         fd.append('fileName', file.name);
         fd.append('totalSize', file.size);
         fd.append('chunkSize', CHUNK_SIZE);
         if (file.type) fd.append('contentType', file.type);
+        if (checksum) fd.append('checksum', checksum);
 
         const r = await fetch(`${apiBase}/api/uploads/initiate`, { method: 'POST', body: fd });
         if (!r.ok) throw new Error('initiate failed: ' + r.status);
@@ -34,9 +62,18 @@ window.uploaderInit = function (apiBase) {
         if (!r.ok) throw new Error("chunk failed " + index);
     }
 
-    async function complete(uploadId) {
-        const r = await fetch(`${apiBase}/api/uploads/${uploadId}/complete`, { method: 'POST' });
-        if (!r.ok) throw new Error('complete failed: ' + r.status);
+    async function complete(uploadId, checksum) {
+        const fd = new FormData();
+        if (checksum) fd.append('checksum', checksum);
+
+        const r = await fetch(`${apiBase}/api/uploads/${uploadId}/complete`, {
+            method: 'POST',
+            body: fd
+        });
+        if (!r.ok) {
+            const text = await r.text();
+            throw new Error('complete failed: ' + r.status + ' ' + text);
+        }
         return await r.json();
     }
 
@@ -59,18 +96,26 @@ window.uploaderInit = function (apiBase) {
         updateProgress(0);
 
         let uploadId = null;
+        let checksum = null;
 
         try {
-            const init = await initiate(file);
+            // 1) Optional client-side checksum
+            checksum = await computeSha256(file);
+            if (checksum) {
+                console.log("[UPLOAD] client SHA-256:", checksum);
+            }
+
+            // 2) Initiate
+            const init = await initiate(file, checksum);
             uploadId = init.uploadId;
             const totalChunks = init.totalChunks;
 
-            // Persist for possible future resume support
             try {
                 localStorage.setItem('lastUploadId', uploadId);
                 localStorage.setItem('lastUploadFileName', file.name);
             } catch { /* ignore */ }
 
+            // 3) Resume support
             const received = new Set();
             const existing = await status(uploadId);
             if (existing?.received) existing.received.forEach(i => received.add(i));
@@ -110,16 +155,16 @@ window.uploaderInit = function (apiBase) {
             const workers = Array.from({ length: MAX_WORKERS }, () => worker());
             await Promise.all(workers);
 
-            const result = await complete(uploadId);
-            updateProgress(100);
-            progressBar.textContent = "100% - done";
+            // 4) Complete + server-side verify
+            updateProgress(99, "Verifying...");
+            const result = await complete(uploadId, checksum);
+            updateProgress(100, "100% - done");
             console.log("[UPLOAD] completed", result);
 
         } catch (err) {
             console.error("[UPLOAD] failed", err);
             progressBar.textContent = "Error";
 
-            // Best-effort abort so server can clean temp files
             if (uploadId) {
                 try { await abort(uploadId); } catch { /* ignore */ }
             }

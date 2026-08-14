@@ -11,6 +11,11 @@ public interface IFileStorage
     /// </summary>
     Task<string> MergeAsync(Guid uploadId, string fileName, int totalChunks, CancellationToken ct = default);
 
+    /// <summary>
+    /// Computes SHA-256 of a file on disk and returns lowercase hex string.
+    /// </summary>
+    Task<string> ComputeSha256Async(string filePath, CancellationToken ct = default);
+
     Task DeleteTempFolderAsync(Guid uploadId, CancellationToken ct = default);
 
     Task DeleteFinalFileAsync(string fileName, CancellationToken ct = default);
