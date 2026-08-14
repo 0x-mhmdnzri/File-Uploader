@@ -46,10 +46,14 @@ try
 
     builder.Services.Configure<StorageOptions>(
         builder.Configuration.GetSection(StorageOptions.SectionName));
+    builder.Services.Configure<ObjectStorageOptions>(
+        builder.Configuration.GetSection(ObjectStorageOptions.SectionName));
     builder.Services.Configure<WebhookOptions>(
         builder.Configuration.GetSection(WebhookOptions.SectionName));
     builder.Services.Configure<AuthOptions>(
         builder.Configuration.GetSection(AuthOptions.SectionName));
+    builder.Services.Configure<RabbitMqOptions>(
+        builder.Configuration.GetSection(RabbitMqOptions.SectionName));
 
     var connectionString = builder.Configuration.GetConnectionString("Default")
                            ?? "Data Source=uploads.db";
@@ -58,8 +62,21 @@ try
         options.UseSqlite(connectionString));
 
     builder.Services.AddScoped<IUploadRepository, EfUploadRepository>();
-    builder.Services.AddSingleton<IFileHasher, Sha256FileHasher>();
-    builder.Services.AddSingleton<IFileStorage, FileSystemStorage>();
+
+    // Hasher: Hardware (default) or Cpu
+    var hasherMode = builder.Configuration.GetSection(StorageOptions.SectionName)["Hasher"] ?? "Hardware";
+    if (string.Equals(hasherMode, "Cpu", StringComparison.OrdinalIgnoreCase))
+        builder.Services.AddSingleton<IFileHasher, Sha256FileHasher>();
+    else
+        builder.Services.AddSingleton<IFileHasher, HardwareSha256FileHasher>();
+
+    // Storage: FileSystem (default) or S3
+    var provider = builder.Configuration.GetSection(StorageOptions.SectionName)["Provider"] ?? "FileSystem";
+    if (string.Equals(provider, "S3", StringComparison.OrdinalIgnoreCase))
+        builder.Services.AddSingleton<IFileStorage, S3FileStorage>();
+    else
+        builder.Services.AddSingleton<IFileStorage, FileSystemStorage>();
+
     builder.Services.AddSingleton<IReceivedChunkCache, ReceivedChunkCache>();
     builder.Services.AddSingleton<ISessionCache>(sp =>
     {
@@ -79,6 +96,11 @@ try
     builder.Services.AddHttpClient<WebhookUploadEventHandler>();
     builder.Services.AddSingleton<IUploadEventHandler>(sp =>
         sp.GetRequiredService<WebhookUploadEventHandler>());
+
+    // Optional RabbitMQ bridge
+    builder.Services.AddSingleton<RabbitMqUploadEventHandler>();
+    builder.Services.AddSingleton<IUploadEventHandler>(sp =>
+        sp.GetRequiredService<RabbitMqUploadEventHandler>());
 
     builder.Services.AddHostedService<OrphanCleanupService>();
 
@@ -135,7 +157,9 @@ try
     app.MapHealthChecks("/health");
     app.MapGet("/api/metrics", (IUploadMetrics metrics) => Results.Ok(metrics.Snapshot()));
 
-    Log.Information("File Uploader API starting");
+    Log.Information(
+        "File Uploader API starting Provider={Provider} Hasher={Hasher}",
+        provider, hasherMode);
     app.Run();
 }
 catch (Exception ex)
