@@ -1,4 +1,5 @@
 using System.IO.Hashing;
+using System.Security.Cryptography;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using WebApi.Infrastructure;
@@ -47,7 +48,8 @@ public class UploadController : ControllerBase
                 chunkSize = session.ChunkSize,
                 totalChunks = session.TotalChunks,
                 expiresAt = session.ExpiresAt,
-                requireChunkCrc32 = _options.RequireChunkCrc32
+                requireChunkCrc32 = _options.RequireChunkCrc32,
+                requireChunkSha256 = _options.RequireChunkSha256
             });
         }
         catch (ArgumentException ex)
@@ -60,6 +62,10 @@ public class UploadController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Upload one chunk. Optional Content-Encoding: gzip|deflate|br.
+    /// Optional headers: X-Chunk-CRC32, X-Chunk-SHA256 (required when configured).
+    /// </summary>
     [HttpPut("{uploadId:guid}/chunk/{index:int}")]
     [RequestSizeLimit(100_000_000)]
     public async Task<IActionResult> UploadChunk(
@@ -75,23 +81,60 @@ public class UploadController : ControllerBase
             await using var decoded = ChunkDecompression.Wrap(Request.Body, encoding);
 
             var expectedCrc = Request.Headers["X-Chunk-CRC32"].ToString();
+            var expectedSha = Request.Headers["X-Chunk-SHA256"].ToString();
+
             if (_options.RequireChunkCrc32 && string.IsNullOrWhiteSpace(expectedCrc))
                 return BadRequest(new { error = "X-Chunk-CRC32 header is required." });
 
-            if (!string.IsNullOrWhiteSpace(expectedCrc))
+            if (_options.RequireChunkSha256 && string.IsNullOrWhiteSpace(expectedSha))
+                return BadRequest(new { error = "X-Chunk-SHA256 header is required." });
+
+            var needCrc = !string.IsNullOrWhiteSpace(expectedCrc) || _options.RequireChunkCrc32;
+            var needSha = !string.IsNullOrWhiteSpace(expectedSha) || _options.RequireChunkSha256;
+
+            if (needCrc || needSha)
             {
-                var crc = new Crc32();
-                await using var tee = new TeeReadStream(decoded, mem => crc.Append(mem.Span));
+                Crc32? crc = needCrc ? new Crc32() : null;
+                IncrementalHash? sha = needSha ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
+
+                await using var tee = new TeeReadStream(decoded, mem =>
+                {
+                    if (crc is not null)
+                        crc.Append(mem.Span);
+                    if (sha is not null)
+                        sha.AppendData(mem.Span);
+                });
+
                 await _storage.SaveChunkAsync(uploadId, index, tee, ct);
 
-                var actual = Convert.ToHexString(crc.GetCurrentHash()).ToLowerInvariant();
-                if (!ChunkCrc32.EqualsHex(expectedCrc, actual))
+                if (crc is not null && !string.IsNullOrWhiteSpace(expectedCrc))
                 {
-                    await _storage.DeleteChunkAsync(uploadId, index, ct);
-                    return BadRequest(new
+                    var actualCrc = Convert.ToHexString(crc.GetCurrentHash()).ToLowerInvariant();
+                    if (!ChunkCrc32.EqualsHex(expectedCrc, actualCrc))
                     {
-                        error = $"Chunk CRC32 mismatch. Expected {expectedCrc}, got {actual}."
-                    });
+                        await _storage.DeleteChunkAsync(uploadId, index, ct);
+                        return BadRequest(new
+                        {
+                            error = $"Chunk CRC32 mismatch. Expected {expectedCrc}, got {actualCrc}."
+                        });
+                    }
+                }
+
+                if (sha is not null && !string.IsNullOrWhiteSpace(expectedSha))
+                {
+                    var actualSha = Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant();
+                    var exp = expectedSha.Trim().ToLowerInvariant();
+                    if (exp.StartsWith("sha256:"))
+                        exp = exp["sha256:".Length..];
+
+                    if (!string.Equals(exp, actualSha, StringComparison.OrdinalIgnoreCase))
+                    {
+                        await _storage.DeleteChunkAsync(uploadId, index, ct);
+                        return BadRequest(new
+                        {
+                            error = $"Chunk SHA-256 mismatch. Expected {exp}, got {actualSha}."
+                        });
+                    }
                 }
             }
             else

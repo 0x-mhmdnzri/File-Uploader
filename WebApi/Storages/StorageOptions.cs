@@ -22,29 +22,22 @@ public class StorageOptions
 
     public int MaxPendingSessionsPerIp { get; set; } = 5;
 
-    /// <summary>
-    /// Global concurrent disk IO gate. 0 = clamp(ProcessorCount, 2, 16).
-    /// </summary>
     public int MaxConcurrentDiskIo { get; set; } = 0;
 
-    /// <summary>
-    /// Degree of parallelism for offset-based merge.
-    /// </summary>
     public int MergeParallelism { get; set; } = 4;
 
-    /// <summary>
-    /// When true, merge copies parts in order while updating SHA-256 (true single pass).
-    /// When false (default), parallel offset writes then sequential hash.
-    /// </summary>
     public bool SinglePassMergeAndHash { get; set; } = false;
 
     /// <summary>
-    /// When true, require X-Chunk-CRC32 header and reject mismatched chunks.
+    /// When true, require X-Chunk-CRC32 and reject mismatches (deletes bad part).
     /// </summary>
     public bool RequireChunkCrc32 { get; set; } = false;
 
     /// <summary>
-    /// Session cache TTL in seconds for hot-path chunk validation.
+    /// When true, require X-Chunk-SHA256 (64 hex) and reject mismatches (deletes bad part).
+    /// Stronger than CRC32; costs one SHA-256 over each chunk body on the server.
     /// </summary>
+    public bool RequireChunkSha256 { get; set; } = false;
+
     public int SessionCacheTtlSeconds { get; set; } = 30;
 }
