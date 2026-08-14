@@ -1,51 +1,58 @@
-﻿@page
+@page
 @model IndexModel
 @{
-    ViewData["Title"] = "Home page";
+    ViewData["Title"] = "File Uploader";
 }
 
-<div class="text-center">
-    <h1 class="display-4">Welcome</h1>
-    <p>Learn about <a href="https://learn.microsoft.com/aspnet/core">building Web apps with ASP.NET Core</a>.</p>
-</div>
+<div class="container py-4" style="max-width: 640px;">
+    <h1 class="h3 mb-4">File Uploader</h1>
 
-<input type="file" id="file" class="form-control mb-3" />
-
-<button id="start" class="btn btn-primary mb-3">Start Upload</button>
-
-
-
-
-
-<div class="progress" style="height: 30px;">
-    <div id="progress-bar"
-         class="progress-bar progress-bar-striped progress-bar-animated bg-success"
-         role="progressbar"
-         style="width: 0%;"
-         aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
-        0%
+    <div id="resume-banner" class="alert alert-info d-none" role="alert">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span id="resume-text">An unfinished upload was found.</span>
+            <div class="d-flex gap-2">
+                <button type="button" id="resume-btn" class="btn btn-sm btn-primary">Resume</button>
+                <button type="button" id="discard-btn" class="btn btn-sm btn-outline-secondary">Discard</button>
+            </div>
+        </div>
     </div>
+
+    <div class="mb-3">
+        <label for="file" class="form-label">Select file</label>
+        <input type="file" id="file" class="form-control" />
+    </div>
+
+    <div class="d-flex flex-wrap gap-2 mb-3">
+        <button type="button" id="start" class="btn btn-primary">Start Upload</button>
+        <button type="button" id="pause" class="btn btn-warning" disabled>Pause</button>
+        <button type="button" id="cancel" class="btn btn-danger" disabled>Cancel</button>
+    </div>
+
+    <div class="progress mb-2" style="height: 28px;">
+        <div id="progress-bar"
+             class="progress-bar progress-bar-striped progress-bar-animated bg-success"
+             role="progressbar"
+             style="width: 0%;"
+             aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+            0%
+        </div>
+    </div>
+
+    <div class="d-flex justify-content-between small text-muted">
+        <span id="status-text">Ready</span>
+        <span id="speed-text"></span>
+    </div>
+
+    <div id="error-box" class="alert alert-danger mt-3 d-none" role="alert"></div>
 </div>
-
-
 
 @section Scripts {
-
     <script src="~/js/upload.js"></script>
-
     <script>
         const apiBase = '@Model.ApiBase';
-        console.log("[RAZOR] apiBase:", apiBase);
-
-        // برای مطمئن شدن از لود فایل
-        console.log("[RAZOR] uploaderInit:", window.uploaderInit);
-
         window.addEventListener("DOMContentLoaded", () => {
-            console.log("[RAZOR] DOM loaded, calling uploaderInit");
             if (window.uploaderInit) window.uploaderInit(apiBase);
-            else console.error("uploaderInit NOT FOUND after DOM load");
+            else console.error("uploaderInit NOT FOUND");
         });
     </script>
 }
-
-  

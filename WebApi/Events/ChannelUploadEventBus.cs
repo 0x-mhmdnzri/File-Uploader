@@ -2,29 +2,23 @@ using System.Threading.Channels;
 
 namespace WebApi.Events;
 
-public class ChannelUploadEventBus : IUploadEventBus
+/// <summary>
+/// Bounded in-process bus. Publish is non-blocking (waits if full).
+/// </summary>
+public sealed class ChannelUploadEventBus
 {
-    private readonly Channel<UploadEvent> _channel;
+    private readonly Channel<UploadEventEnvelope> _channel;
 
     public ChannelUploadEventBus()
     {
-        _channel = Channel.CreateUnbounded<UploadEvent>(new UnboundedChannelOptions
+        _channel = Channel.CreateBounded<UploadEventEnvelope>(new BoundedChannelOptions(256)
         {
-            SingleReader = false,
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
             SingleWriter = false
         });
     }
 
-    public ValueTask PublishAsync(UploadEvent @event, CancellationToken cancellationToken = default)
-    {
-        return _channel.Writer.WriteAsync(@event, cancellationToken);
-    }
-
-    public async IAsyncEnumerable<UploadEvent> SubscribeAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        await foreach (var item in _channel.Reader.ReadAllAsync(cancellationToken))
-        {
-            yield return item;
-        }
-    }
+    public ChannelWriter<UploadEventEnvelope> Writer => _channel.Writer;
+    public ChannelReader<UploadEventEnvelope> Reader => _channel.Reader;
 }
