@@ -6,28 +6,26 @@
 
 ## ✅ وضعیت فعلی
 
-- [x] Chunked Upload (پیش‌فرض کلاینت: ۱۶ مگابایت)
-- [x] آپلود موازی (Parallel Workers)
-- [x] Resume از طریق status + localStorage + UI
+- [x] Chunked Upload + Parallel Workers
+- [x] Resume (status + localStorage + UI)
 - [x] FileSystem storage + sequential merge
-- [x] معماری تمیز (Controller / Service / Storage / Repository)
-- [x] EF Core + SQLite
-- [x] وضعیت دو مرحله‌ای (Pending → Completed / Expired / Aborted / Failed)
+- [x] معماری تمیز + EF Core / SQLite
+- [x] Pending → Completed / Expired / Aborted / Failed
 - [x] Orphan Cleanup BackgroundService
-- [x] Abort / Cancel endpoint + دکمه Cancel در UI
+- [x] Abort / Cancel (API + UI)
 - [x] مدیریت نام فایل تکراری
-- [x] Checksum SHA-256 (کلاینت + سرور)
-- [x] محدودیت‌های امنیتی (حجم، extension، session per IP)
-- [x] **Pause / Resume در UI**
-- [x] **نمایش سرعت آپلود (MB/s)**
-- [x] **بنر Resume بعد از رفرش صفحه**
+- [x] Checksum SHA-256
+- [x] محدودیت‌های امنیتی پایه
+- [x] Pause / Resume / سرعت / بنر Resume
+- [x] **Serilog (Console + File)**
+- [x] **Health Check (`/health`)**
+- [x] **متریک‌های پایه (`/api/metrics`)**
 
 ### باقی‌مانده
 
 | موضوع | توضیح |
 |------|--------|
-| Auth | هنوز احراز هویت نداریم |
-| Observability | Serilog / Health / Metrics |
+| Auth | JWT / API Key |
 
 ---
 
@@ -43,43 +41,21 @@
 | پاکسازی | BackgroundJob + TTL |
 | DB | EF Core + SQLite |
 | Checksum | SHA-256 اختیاری |
+| Logging | Serilog |
 
 ---
 
 ## 🚀 Backlog
 
 ### 🔴 اولویت ۱ — Critical — ✅
-
-- [x] وضعیت دو مرحله‌ای
-- [x] Cleanup Job
-- [x] Persistent Storage
-- [x] اصلاح Merge
-
 ### 🟠 اولویت ۲ — High — ✅
 
-- [x] Checksum (SHA-256)
-- [x] Abort / Cancel
-- [x] مدیریت نام فایل تکراری
-- [x] محدودیت‌های امنیتی پایه
+### 🟡 اولویت ۳ — Medium — ✅
 
-### 🟡 اولویت ۳ — Medium
-
-#### 3.1 — بهبود Resume
-- [x] ذخیره session در localStorage
-- [x] UI Resume بعد از رفرش (بنر + دکمه Resume/Discard)
-
-#### 3.2 — Progress و Observability
-- [ ] لاگ ساختاریافته (Serilog)
-- [ ] متریک‌های پایه
-- [ ] Health Check endpoint
-
-#### 3.3 — بهبود کلاینت
-- [x] نمایش سرعت آپلود (MB/s)
-- [x] دکمه Pause / Resume / Cancel در UI
-- [x] مدیریت بهتر خطاها (پیام روی صفحه)
-
-#### 3.4 — Staging / Final
-- [x] `temp/` و `uploads/`
+- [x] 3.1 Resume UI
+- [x] 3.2 Observability (Serilog / Health / Metrics)
+- [x] 3.3 Client UX
+- [x] 3.4 Staging / Final
 
 ### 🟢 اولویت ۴ — Low / Future
 
@@ -88,23 +64,37 @@
 - [ ] پشتیبانی از HTTP/3
 - [ ] Distributed Upload (چند نود)
 - [ ] Virus Scanning بعد از complete
-- [ ] **GPU-accelerated hashing**
-- [ ] **Brotli / Deflate per-chunk compression**
+- [ ] GPU-accelerated hashing
+- [ ] Brotli / Deflate per-chunk compression
+- [ ] Prometheus / OpenTelemetry exporter (در صورت نیاز production)
 
 ---
 
-## 📌 تنظیمات امنیتی
+## 📌 Observability
+
+| Endpoint | توضیح |
+|----------|--------|
+| `GET /health` | وضعیت process + DB + storage |
+| `GET /api/metrics` | شمارنده‌های in-process آپلود |
+
+لاگ‌ها:
+- Console
+- فایل روزانه: `logs/uploader-YYYYMMDD.log` (۱۴ روز نگه‌داری)
+
+نمونه پاسخ metrics:
 
 ```json
-"StorageOptions": {
-  "MaxFileSizeBytes": 21474836480,
-  "MaxChunkSizeBytes": 33554432,
-  "MaxPendingSessionsPerIp": 5,
-  "AllowedExtensions": [],
-  "BlockedExtensions": [ "exe", "bat", "cmd", "com", "msi", "scr", "ps1", "vbs", "js", "jar", "dll", "sh" ]
+{
+  "initiated": 12,
+  "completed": 10,
+  "failed": 1,
+  "aborted": 1,
+  "chunksUploaded": 340,
+  "bytesCompleted": 524288000,
+  "since": "2026-08-14T07:00:00Z"
 }
 ```
 
 ---
 
-*آخرین به‌روزرسانی: Client UX (Pause/Resume/Cancel، سرعت، Resume UI) — 3.1 و 3.3 انجام شد.*
+*آخرین به‌روزرسانی: Observability (3.2) — Serilog + Health + Metrics.*

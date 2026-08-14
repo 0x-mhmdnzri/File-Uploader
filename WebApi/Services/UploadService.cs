@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using WebApi.Domain;
 using WebApi.Interfaces;
+using WebApi.Metrics;
 using WebApi.Storages;
 
 namespace WebApi.Services;
@@ -10,17 +11,20 @@ public class UploadService : IUploadService
     private readonly IUploadRepository _repo;
     private readonly IFileStorage _storage;
     private readonly StorageOptions _options;
+    private readonly IUploadMetrics _metrics;
     private readonly ILogger<UploadService> _logger;
 
     public UploadService(
         IUploadRepository repo,
         IFileStorage storage,
         IOptions<StorageOptions> options,
+        IUploadMetrics metrics,
         ILogger<UploadService> logger)
     {
         _repo = repo;
         _storage = storage;
         _options = options.Value;
+        _metrics = metrics;
         _logger = logger;
     }
 
@@ -42,7 +46,6 @@ public class UploadService : IUploadService
         if (chunkSize <= 0)
             throw new ArgumentException("chunkSize must be positive", nameof(chunkSize));
 
-        // --- Security limits ---
         ValidateFileSize(totalSize);
         ValidateChunkSize(chunkSize);
         ValidateExtension(fileName);
@@ -75,6 +78,7 @@ public class UploadService : IUploadService
         };
 
         await _repo.AddAsync(session, ct);
+        _metrics.RecordInitiated();
 
         _logger.LogInformation(
             "Upload initiated {UploadId} for {FileName} ({TotalSize} bytes, {TotalChunks} chunks, ip={ClientIp})",
@@ -96,6 +100,7 @@ public class UploadService : IUploadService
 
         session.MarkChunkReceived(chunkIndex);
         await _repo.UpdateAsync(session, ct);
+        _metrics.RecordChunkUploaded();
     }
 
     public async Task<string> CompleteAsync(Guid uploadId, string? checksum = null, CancellationToken ct = default)
@@ -131,6 +136,7 @@ public class UploadService : IUploadService
             _logger.LogError(ex, "Merge failed for upload {UploadId}", uploadId);
             session.Status = UploadStatus.Failed;
             await _repo.UpdateAsync(session, ct);
+            _metrics.RecordFailed();
             throw;
         }
 
@@ -147,6 +153,7 @@ public class UploadService : IUploadService
                 await _storage.DeleteFinalFileAsync(Path.GetFileName(finalPath), ct);
                 session.Status = UploadStatus.Failed;
                 await _repo.UpdateAsync(session, ct);
+                _metrics.RecordFailed();
                 throw;
             }
 
@@ -160,6 +167,7 @@ public class UploadService : IUploadService
                 session.Status = UploadStatus.Failed;
                 session.Checksum = actualChecksum;
                 await _repo.UpdateAsync(session, ct);
+                _metrics.RecordFailed();
 
                 throw new InvalidOperationException(
                     $"Checksum mismatch. Expected {expectedChecksum}, got {actualChecksum}");
@@ -184,6 +192,7 @@ public class UploadService : IUploadService
         session.CompletedAt = DateTime.UtcNow;
         session.FinalFileName = Path.GetFileName(finalPath);
         await _repo.UpdateAsync(session, ct);
+        _metrics.RecordCompleted(session.TotalSize);
 
         _logger.LogInformation(
             "Upload completed {UploadId} → {FinalFileName}",
@@ -203,6 +212,7 @@ public class UploadService : IUploadService
         session.Status = UploadStatus.Aborted;
         await _repo.UpdateAsync(session, ct);
         await _storage.DeleteTempFolderAsync(uploadId, ct);
+        _metrics.RecordAborted();
 
         _logger.LogInformation("Upload aborted {UploadId}", uploadId);
     }
@@ -211,8 +221,6 @@ public class UploadService : IUploadService
     {
         return _repo.GetAsync(uploadId, ct);
     }
-
-    // ---------- validation helpers ----------
 
     private void ValidateFileSize(long totalSize)
     {
@@ -236,7 +244,6 @@ public class UploadService : IUploadService
     {
         var ext = Path.GetExtension(fileName).TrimStart('.').ToLowerInvariant();
 
-        // Empty extension is treated as blocked if we have any policy
         if (string.IsNullOrEmpty(ext))
         {
             if (_options.AllowedExtensions is { Length: > 0 })
@@ -246,16 +253,12 @@ public class UploadService : IUploadService
 
         var blocked = _options.BlockedExtensions ?? [];
         if (blocked.Any(b => string.Equals(b.TrimStart('.'), ext, StringComparison.OrdinalIgnoreCase)))
-        {
             throw new ArgumentException($"File extension '.{ext}' is blocked.");
-        }
 
         var allowed = _options.AllowedExtensions ?? [];
         if (allowed.Length > 0 &&
             !allowed.Any(a => string.Equals(a.TrimStart('.'), ext, StringComparison.OrdinalIgnoreCase)))
-        {
             throw new ArgumentException($"File extension '.{ext}' is not in the allowed list.");
-        }
     }
 
     private static string? NormalizeChecksum(string? checksum)
