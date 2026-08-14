@@ -29,15 +29,29 @@ public class UploadController : ControllerBase
         [FromForm] string? checksum = null,
         CancellationToken ct = default)
     {
-        var session = await _service.InitiateAsync(fileName, totalSize, chunkSize, contentType, checksum, ct);
-
-        return Ok(new
+        try
         {
-            uploadId = session.Id,
-            chunkSize = session.ChunkSize,
-            totalChunks = session.TotalChunks,
-            expiresAt = session.ExpiresAt
-        });
+            var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString();
+
+            var session = await _service.InitiateAsync(
+                fileName, totalSize, chunkSize, contentType, checksum, clientIp, ct);
+
+            return Ok(new
+            {
+                uploadId = session.Id,
+                chunkSize = session.ChunkSize,
+                totalChunks = session.TotalChunks,
+                expiresAt = session.ExpiresAt
+            });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new { error = ex.Message });
+        }
     }
 
     /// <summary>
@@ -50,15 +64,20 @@ public class UploadController : ControllerBase
         [FromRoute] int index,
         CancellationToken ct = default)
     {
-        await _storage.SaveChunkAsync(uploadId, index, Request.Body, ct);
-        await _service.MarkChunkReceivedAsync(uploadId, index, ct);
-        return Ok();
+        try
+        {
+            await _storage.SaveChunkAsync(uploadId, index, Request.Body, ct);
+            await _service.MarkChunkReceivedAsync(uploadId, index, ct);
+            return Ok();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
     /// <summary>
     /// Finalize the upload: merge chunks, optionally verify checksum, mark Completed.
-    /// Body (optional JSON): { "checksum": "abc..." }
-    /// Or form field: checksum
     /// </summary>
     [HttpPost("{uploadId:guid}/complete")]
     public async Task<IActionResult> Complete(
@@ -66,7 +85,6 @@ public class UploadController : ControllerBase
         [FromForm] string? checksum = null,
         CancellationToken ct = default)
     {
-        // Also accept JSON body for convenience
         if (checksum is null && Request.HasJsonContentType())
         {
             try
@@ -76,12 +94,19 @@ public class UploadController : ControllerBase
             }
             catch
             {
-                // ignore malformed json; checksum stays null
+                // ignore
             }
         }
 
-        var finalPath = await _service.CompleteAsync(uploadId, checksum, ct);
-        return Ok(new { path = finalPath });
+        try
+        {
+            var finalPath = await _service.CompleteAsync(uploadId, checksum, ct);
+            return Ok(new { path = finalPath });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
     /// <summary>
@@ -92,8 +117,15 @@ public class UploadController : ControllerBase
         [FromRoute] Guid uploadId,
         CancellationToken ct = default)
     {
-        await _service.AbortAsync(uploadId, ct);
-        return NoContent();
+        try
+        {
+            await _service.AbortAsync(uploadId, ct);
+            return NoContent();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return NotFound(new { error = ex.Message });
+        }
     }
 
     /// <summary>

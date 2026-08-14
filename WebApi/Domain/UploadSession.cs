@@ -33,6 +33,11 @@ public class UploadSession
     public string? ContentType { get; set; }
 
     /// <summary>
+    /// Client IP that initiated the upload (for rate limiting).
+    /// </summary>
+    public string? ClientIp { get; set; }
+
+    /// <summary>
     /// Comma-separated list of received chunk indexes (e.g. "0,1,2,5").
     /// Kept simple for SQLite; can be moved to a child table later if needed.
     /// </summary>

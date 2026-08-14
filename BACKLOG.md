@@ -7,140 +7,110 @@
 
 ## ✅ وضعیت فعلی (Current State)
 
-پروژه در حال حاضر این قابلیت‌ها را دارد:
-
 - [x] Chunked Upload با سایز قابل تنظیم (پیش‌فرض کلاینت: ۱۶ مگابایت)
 - [x] آپلود موازی (Parallel Workers) در کلاینت
 - [x] Resume نسبی از طریق endpoint وضعیت
 - [x] ذخیره‌سازی چانک‌ها روی FileSystem
 - [x] Merge نهایی چانک‌ها (sequential + stream)
 - [x] معماری تمیز (Controller / Service / Storage / Repository)
-- [x] **Persistent Storage با EF Core + SQLite**
-- [x] **وضعیت دو مرحله‌ای (Pending → Completed / Expired / Aborted / Failed)**
-- [x] **Orphan Cleanup BackgroundService**
-- [x] **Abort / Cancel endpoint**
-- [x] **مدیریت نام فایل تکراری**
-- [x] **Checksum (SHA-256) verification**
+- [x] Persistent Storage با EF Core + SQLite
+- [x] وضعیت دو مرحله‌ای (Pending → Completed / Expired / Aborted / Failed)
+- [x] Orphan Cleanup BackgroundService
+- [x] Abort / Cancel endpoint
+- [x] مدیریت نام فایل تکراری
+- [x] Checksum (SHA-256) verification
+- [x] **محدودیت‌های امنیتی پایه** (حجم، extension، session per IP)
 
 ### مشکلات و محدودیت‌های باقی‌مانده
 
 | مشکل | توضیح |
 |------|--------|
 | **عدم وجود Auth** | هر کسی می‌تواند آپلود کند |
-| **محدودیت حجم/نوع فایل** | هنوز enforce نشده |
 | **Resume کامل در کلاینت** | localStorage اضافه شده ولی UI کامل نیست |
 
 ---
 
-## 🎯 تصمیمات معماری قطعی (Final Decisions)
+## 🎯 تصمیمات معماری قطعی
 
-| موضوع | تصمیم نهایی | دلیل |
-|-------|-------------|------|
-| **پروتکل** | HTTP/2 + Chunked Upload (REST) | پشتیبانی عالی مرورگر، multiplexing، سادگی |
-| **gRPC** | ❌ استفاده نشود | اورهد protobuf برای باینری، پشتیبانی ضعیف مرورگر |
-| **Object Storage خارجی (S3/MinIO/Garage)** | ❌ استفاده نشود | هدف پروژه ساخت Storage Service خودمان است |
-| **ذخیره‌سازی** | FileSystem + طراحی قابل تعویض از طریق `IFileStorage` | سادگی + امکان مهاجرت بعدی |
-| **وضعیت فایل** | دو مرحله‌ای: `Pending` → `Completed` | مدیریت Orphan |
-| **پاکسازی** | Background Job + TTL | جلوگیری از پر شدن دیسک |
-| **Repository** | EF Core + SQLite (قابل تعویض با PostgreSQL) | Production-ready |
-| **Checksum** | SHA-256 (اختیاری از سمت کلاینت) | تعادل خوب بین امنیت و عملکرد |
+| موضوع | تصمیم نهایی |
+|-------|-------------|
+| پروتکل | HTTP/2 + Chunked Upload (REST) |
+| gRPC | ❌ استفاده نشود |
+| Object Storage خارجی | ❌ استفاده نشود |
+| ذخیره‌سازی | FileSystem + `IFileStorage` |
+| وضعیت فایل | Pending → Completed |
+| پاکسازی | Background Job + TTL |
+| Repository | EF Core + SQLite |
+| Checksum | SHA-256 (اختیاری) |
 
 ---
 
-## 🚀 Backlog اولویت‌بندی‌شده
+## 🚀 Backlog
 
-### 🔴 اولویت ۱ — Critical
+### 🔴 اولویت ۱ — Critical — ✅ انجام شد
 
-#### 1.1 — اضافه کردن وضعیت دو مرحله‌ای به UploadSession
-- [x] فیلد `Status` اضافه شود: `Pending` | `Completed` | `Expired` | `Aborted` | `Failed`
-- [x] فیلد `ExpiresAt` اضافه شود
-- [x] فقط وقتی `complete` صدا زده می‌شود، وضعیت به `Completed` تغییر کند
+- [x] وضعیت دو مرحله‌ای
+- [x] Cleanup Job
+- [x] Persistent Storage
+- [x] اصلاح Merge
 
-#### 1.2 — پیاده‌سازی Cleanup Job برای فایل‌های Orphan
-- [x] `OrphanCleanupService` (BackgroundService) پیاده‌سازی شد
-- [x] sessionهای `Pending` منقضی‌شده پیدا و temp folder حذف می‌شود
+### 🟠 اولویت ۲ — High
 
-#### 1.3 — مهاجرت از InMemory به Persistent Storage
-- [x] Entity Framework Core + SQLite
-- [x] `EfUploadRepository` جایگزین InMemory شد
-- [x] `EnsureCreated` در startup
-
-#### 1.4 — اصلاح Merge
-- [x] Merge به صورت **sequential** و stream-based بازنویسی شد
-- [x] حذف parallel write + lock
-- [x] پاک کردن temp بعد از merge موفق
+- [x] Checksum (SHA-256)
+- [x] Abort / Cancel
 - [x] مدیریت نام فایل تکراری
-
----
-
-### 🟠 اولویت ۲ — High (کیفیت و قابلیت اطمینان)
-
-#### 2.1 — اضافه کردن Checksum
-- [x] کلاینت بتواند hash کل فایل (SHA-256) را بفرستد
-- [x] سرور بعد از merge، hash فایل نهایی را محاسبه و مقایسه کند
-- [x] در صورت عدم تطابق، وضعیت به `Failed` تغییر کند و فایل حذف شود
-
-#### 2.2 — پشتیبانی از Abort / Cancel
-- [x] endpoint: `DELETE /api/uploads/{id}`
-- [x] وضعیت به `Aborted` + حذف temp
-
-#### 2.3 — مدیریت نام فایل تکراری
-- [x] در صورت وجود فایل هم‌نام، GUID به نام اضافه می‌شود
-
-#### 2.4 — محدودیت‌های امنیتی پایه
-- [ ] محدودیت حداکثر حجم فایل (مثلاً ۲۰ گیگابایت)
-- [ ] محدودیت نوع فایل (extension whitelist/blacklist)
-- [ ] محدودیت تعداد session همزمان per IP
-
----
+- [x] محدودیت‌های امنیتی پایه
+  - [x] MaxFileSizeBytes (پیش‌فرض ۲۰GB)
+  - [x] MaxChunkSizeBytes (پیش‌فرض ۳۲MB)
+  - [x] BlockedExtensions / AllowedExtensions
+  - [x] MaxPendingSessionsPerIp (پیش‌فرض ۵)
 
 ### 🟡 اولویت ۳ — Medium
 
 #### 3.1 — بهبود Resume
-- [x] ذخیره `uploadId` در localStorage (پایه)
+- [x] ذخیره uploadId در localStorage
 - [ ] UI کامل برای Resume بعد از رفرش صفحه
 
-#### 3.2 — Progress و Observability بهتر
+#### 3.2 — Progress و Observability
 - [ ] لاگ ساختاریافته (Serilog)
 - [ ] متریک‌های پایه
 - [ ] Health Check endpoint
 
-#### 3.3 — بهبود کلاینت (upload.js)
+#### 3.3 — بهبود کلاینت
 - [ ] نمایش سرعت آپلود (MB/s)
 - [ ] دکمه Pause / Resume / Cancel در UI
 - [ ] مدیریت بهتر خطاها
 
 #### 3.4 — جداسازی Staging و Final
-- [x] مسیر `temp/` برای pending و `uploads/` برای final
-
----
+- [x] temp/ برای pending و uploads/ برای final
 
 ### 🟢 اولویت ۴ — Low / Future
 
 - [ ] Authentication / Authorization (JWT یا API Key)
-- [ ] Rate Limiting
+- [ ] Rate Limiting پیشرفته
 - [ ] پشتیبانی از HTTP/3
 - [ ] Distributed Upload (چند نود)
 - [ ] Virus Scanning بعد از complete
-- [ ] **GPU-accelerated hashing** — استفاده از GPU (مثلاً با CUDA / OpenCL یا کتابخانه‌های .NET مرتبط) برای محاسبه سریع‌تر hash روی فایل‌های خیلی حجیم
-- [ ] **Brotli / Deflate per-chunk compression** — فشرده‌سازی هر چانک در کلاینت و decompress در سرور برای کاهش ترافیک شبکه (با trade-off روی CPU)
+- [ ] **GPU-accelerated hashing**
+- [ ] **Brotli / Deflate per-chunk compression**
 
 ---
 
-## 📌 نحوه اجرا بعد از این تغییرات
+## 📌 تنظیمات امنیتی (appsettings.json)
 
-```bash
-cd WebApi
-dotnet restore
-dotnet run
+```json
+"StorageOptions": {
+  "MaxFileSizeBytes": 21474836480,
+  "MaxChunkSizeBytes": 33554432,
+  "MaxPendingSessionsPerIp": 5,
+  "AllowedExtensions": [],
+  "BlockedExtensions": [ "exe", "bat", "cmd", "com", "msi", "scr", "ps1", "vbs", "js", "jar", "dll", "sh" ]
+}
 ```
 
-- دیتابیس SQLite به صورت خودکار با نام `uploads.db` ساخته می‌شود.
-- فایل‌های موقت در پوشه `temp/` و فایل‌های نهایی در `uploads/` ذخیره می‌شوند.
-- Cleanup Job هر ۶۰ دقیقه (در Development هر ۱۰ دقیقه) اجرا می‌شود.
-- TTL پیش‌فرض sessionهای Pending: ۲۴ ساعت (در Development: ۲ ساعت).
-- Checksum: کلاینت می‌تواند `checksum` (hex SHA-256) را در `complete` بفرستد؛ سرور بعد از merge آن را verify می‌کند.
+- `AllowedExtensions` خالی = همه extensionها مجاز (به‌جز Blocked)
+- اگر `AllowedExtensions` پر باشد، فقط همان‌ها پذیرفته می‌شوند
 
 ---
 
-*آخرین به‌روزرسانی: پیاده‌سازی Checksum + افزودن GPU hashing و per-chunk compression به Future.*
+*آخرین به‌روزرسانی: پیاده‌سازی محدودیت‌های امنیتی پایه (2.4).*

@@ -37,8 +37,12 @@ public class AppDbContext : DbContext
         entity.Property(x => x.ContentType)
             .HasMaxLength(256);
 
+        entity.Property(x => x.ClientIp)
+            .HasMaxLength(64);
+
         entity.HasIndex(x => x.Status);
         entity.HasIndex(x => x.ExpiresAt);
         entity.HasIndex(x => new { x.Status, x.ExpiresAt });
+        entity.HasIndex(x => new { x.ClientIp, x.Status });
     }
 }

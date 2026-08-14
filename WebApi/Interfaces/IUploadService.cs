@@ -10,6 +10,7 @@ public interface IUploadService
         int chunkSize,
         string? contentType = null,
         string? checksum = null,
+        string? clientIp = null,
         CancellationToken ct = default);
 
     Task MarkChunkReceivedAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default);

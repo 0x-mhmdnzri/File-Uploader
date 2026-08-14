@@ -44,4 +44,14 @@ public class EfUploadRepository : IUploadRepository
             .Where(x => x.Status == UploadStatus.Pending && x.ExpiresAt <= now)
             .ToListAsync(ct);
     }
+
+    public Task<int> CountActivePendingByIpAsync(string clientIp, CancellationToken ct = default)
+    {
+        var now = DateTime.UtcNow;
+        return _db.UploadSessions.CountAsync(
+            x => x.ClientIp == clientIp
+                 && x.Status == UploadStatus.Pending
+                 && x.ExpiresAt > now,
+            ct);
+    }
 }
