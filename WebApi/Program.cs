@@ -3,6 +3,8 @@ using Serilog;
 using WebApi.BackgroundServices;
 using WebApi.Data;
 using WebApi.Events;
+using WebApi.Events.Handlers;
+using WebApi.Hashing;
 using WebApi.Health;
 using WebApi.Interfaces;
 using WebApi.Metrics;
@@ -38,6 +40,8 @@ try
 
     builder.Services.Configure<StorageOptions>(
         builder.Configuration.GetSection(StorageOptions.SectionName));
+    builder.Services.Configure<WebhookOptions>(
+        builder.Configuration.GetSection(WebhookOptions.SectionName));
 
     var connectionString = builder.Configuration.GetConnectionString("Default")
                            ?? "Data Source=uploads.db";
@@ -46,12 +50,21 @@ try
         options.UseSqlite(connectionString));
 
     builder.Services.AddScoped<IUploadRepository, EfUploadRepository>();
+    builder.Services.AddSingleton<IFileHasher, Sha256FileHasher>();
     builder.Services.AddSingleton<IFileStorage, FileSystemStorage>();
     builder.Services.AddScoped<IUploadService, UploadService>();
     builder.Services.AddSingleton<IUploadMetrics, UploadMetrics>();
 
-    // Outbound port: default logging adapter (replace/add bus adapter in composition root)
-    builder.Services.AddSingleton<IUploadEventPublisher, LoggingUploadEventPublisher>();
+    // ---- In-process event bus ----
+    builder.Services.AddSingleton<ChannelUploadEventBus>();
+    builder.Services.AddSingleton<IUploadEventPublisher, ChannelUploadEventPublisher>();
+    builder.Services.AddHostedService<UploadEventDispatcherService>();
+
+    // Handlers (add more without touching UploadService)
+    builder.Services.AddSingleton<IUploadEventHandler, LoggingUploadEventHandler>();
+    builder.Services.AddHttpClient<WebhookUploadEventHandler>();
+    builder.Services.AddSingleton<IUploadEventHandler>(sp =>
+        sp.GetRequiredService<WebhookUploadEventHandler>());
 
     builder.Services.AddHostedService<OrphanCleanupService>();
 

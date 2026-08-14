@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using Microsoft.Extensions.Options;
 using WebApi.Interfaces;
 
@@ -7,11 +6,13 @@ namespace WebApi.Storages;
 public class FileSystemStorage : IFileStorage
 {
     private readonly StorageOptions _options;
-    private const int BufferSize = 1 * 1024 * 1024; // 1 MB – good balance for sequential IO
+    private readonly IFileHasher _hasher;
+    private const int BufferSize = 1 * 1024 * 1024; // 1 MB
 
-    public FileSystemStorage(IOptions<StorageOptions> options)
+    public FileSystemStorage(IOptions<StorageOptions> options, IFileHasher hasher)
     {
         _options = options.Value;
+        _hasher = hasher;
     }
 
     public Task EnsureDirectoriesAsync(CancellationToken ct = default)
@@ -89,27 +90,14 @@ public class FileSystemStorage : IFileStorage
         return finalPath;
     }
 
-    public async Task<string> ComputeSha256Async(string filePath, CancellationToken ct = default)
-    {
-        await using var fs = new FileStream(
-            filePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            bufferSize: BufferSize,
-            useAsync: true);
-
-        var hash = await SHA256.HashDataAsync(fs, ct);
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
+    public Task<string> ComputeSha256Async(string filePath, CancellationToken ct = default)
+        => _hasher.ComputeSha256Async(filePath, ct);
 
     public Task DeleteTempFolderAsync(Guid uploadId, CancellationToken ct = default)
     {
         var folder = Path.Combine(_options.TempPath, uploadId.ToString());
         if (Directory.Exists(folder))
-        {
             Directory.Delete(folder, recursive: true);
-        }
         return Task.CompletedTask;
     }
 
@@ -117,9 +105,7 @@ public class FileSystemStorage : IFileStorage
     {
         var path = Path.Combine(_options.FinalPath, Path.GetFileName(fileName));
         if (File.Exists(path))
-        {
             File.Delete(path);
-        }
         return Task.CompletedTask;
     }
 

@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using WebApi.Infrastructure;
 using WebApi.Interfaces;
 
 namespace WebApi.Controllers;
@@ -56,6 +57,8 @@ public class UploadController : ControllerBase
 
     /// <summary>
     /// Upload a single chunk.
+    /// Optional Content-Encoding: gzip | deflate | br (per-chunk transport compression).
+    /// Body is decompressed before storage so parts remain raw.
     /// </summary>
     [HttpPut("{uploadId:guid}/chunk/{index:int}")]
     [RequestSizeLimit(100_000_000)]
@@ -66,13 +69,19 @@ public class UploadController : ControllerBase
     {
         try
         {
-            await _storage.SaveChunkAsync(uploadId, index, Request.Body, ct);
+            var encoding = Request.Headers.ContentEncoding.ToString();
+            await using var stream = ChunkDecompression.Wrap(Request.Body, encoding);
+            await _storage.SaveChunkAsync(uploadId, index, stream, ct);
             await _service.MarkChunkReceivedAsync(uploadId, index, ct);
             return Ok();
         }
         catch (InvalidOperationException ex)
         {
             return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidDataException ex)
+        {
+            return BadRequest(new { error = $"Invalid compressed chunk: {ex.Message}" });
         }
     }
 
