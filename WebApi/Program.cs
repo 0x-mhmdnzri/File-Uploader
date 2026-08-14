@@ -20,10 +20,20 @@ builder.Services.Configure<StorageOptions>(builder.Configuration.GetSection("Sto
 
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowFrontend", policy =>
+    options.AddDefaultPolicy(policy =>
     {
         policy
-            .WithOrigins("https://localhost:7097")
+            .SetIsOriginAllowed(origin =>
+            {
+                // Allow any localhost / 127.0.0.1 with any port in development
+                if (string.IsNullOrEmpty(origin)) return false;
+                try
+                {
+                    var uri = new Uri(origin);
+                    return uri.Host is "localhost" or "127.0.0.1";
+                }
+                catch { return false; }
+            })
             .AllowAnyHeader()
             .AllowAnyMethod()
             .AllowCredentials();
@@ -39,7 +49,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseRouting();
-app.UseCors("AllowFrontend");
+app.UseCors();
 app.MapControllers();
 
 app.Run();
