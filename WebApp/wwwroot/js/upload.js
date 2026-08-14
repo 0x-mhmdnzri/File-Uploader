@@ -1,5 +1,4 @@
-
-window.uploaderInit = function(apiBase) {
+window.uploaderInit = function (apiBase) {
     console.log("[UPLOAD] init called with:", apiBase);
 
     const fileInput = document.getElementById('file');
@@ -25,34 +24,27 @@ window.uploaderInit = function(apiBase) {
         fd.append('fileName', file.name);
         fd.append('totalSize', file.size);
         fd.append('chunkSize', CHUNK_SIZE);
-        const r = await fetch(`${apiBase}/api/uploads/initiate`, { method: 'POST', body: fd });
-        if (!r.ok) {
-            const err = await r.json().catch(() => ({}));
-            throw new Error(err.error || `Initiate failed: ${r.status}`);
-        }
+        const r = await fetch(`${apiBase}/api/client/upload/initiate`, {method: 'POST', body: fd});
         return await r.json();
     }
 
     async function uploadChunk(uploadId, index, blob) {
-        const url = `${apiBase}/api/uploads/${uploadId}/chunk/${index}`;
-        const r = await fetch(url, {
-            method: 'PUT',
-            body: blob,
-            // Keep connection alive / avoid extra headers that hurt latency
-        });
-        if (!r.ok) throw new Error(`chunk ${index} failed (${r.status})`);
+        const url = `${apiBase}/api/client/upload/${uploadId}/chunk/${index}`;
+        const r = await fetch(url, {method: 'PUT', body: blob});
+        if (!r.ok) throw new Error("chunk failed " + index);
     }
 
     async function complete(uploadId) {
-        const r = await fetch(`${apiBase}/api/uploads/${uploadId}/complete`, { method: 'POST' });
-        if (!r.ok) {
-            const err = await r.json().catch(() => ({}));
-            throw new Error(err.error || `Complete failed: ${r.status}`);
+        const r = await fetch(`${apiBase}/api/client/upload/${uploadId}/complete`, {method: 'POST'});
+        try {
+            return await r.json();   // انتظار JSON
+        } catch {
+            return {message: "Upload completed (no JSON returned)"};
         }
     }
 
     async function status(uploadId) {
-        const r = await fetch(`${apiBase}/api/uploads/${uploadId}/status`);
+        const r = await fetch(`${apiBase}/api/client/upload/${uploadId}/status`);
         if (r.status === 404) return null;
         if (!r.ok) throw new Error(`Status failed: ${r.status}`);
         return await r.json();
@@ -117,60 +109,42 @@ window.uploaderInit = function(apiBase) {
 
                 const start = i * CHUNK_SIZE;
                 const end = Math.min(start + CHUNK_SIZE, file.size);
-                const index = i;
-
-                workItems.push(async () => {
-                    let retries = 0;
-                    const maxRetries = 4;
-
-                    while (true) {
-                        try {
-                            const blob = file.slice(start, end);
-                            await uploadChunk(uploadId, index, blob);
-                            uploaded++;
-                            updateProgress(Math.floor((uploaded / totalChunks) * 100));
-                            return index;
-                        } catch (e) {
-                            retries++;
-                            if (retries > maxRetries) throw e;
-                            // exponential backoff + jitter
-                            const delay = Math.min(2000, 200 * Math.pow(2, retries)) + Math.random() * 200;
-                            await new Promise(r => setTimeout(r, delay));
-                        }
-                    }
-                });
+                queue.push({index: i, blob: file.slice(start, end), retries: 0});
             }
-
-            // Parallel execution with controlled concurrency (SemaphoreSlim equivalent)
-            await createWorkQueue(workItems, MAX_WORKERS);
-
-            // ---- Client-side verification before complete ----
-            const finalStatus = await status(uploadId);
-            if (!finalStatus) throw new Error("Session disappeared");
-
-            const serverReceived = new Set(finalStatus.received || []);
-            const missing = [];
-            for (let i = 0; i < totalChunks; i++) {
-                if (!serverReceived.has(i)) missing.push(i);
-            }
-
-            if (missing.length > 0) {
-                console.error("[UPLOAD] Missing chunks after upload:", missing.slice(0, 20));
-                throw new Error(`Verification failed: ${missing.length} chunks missing on server`);
-            }
-
-            // All good → complete (server does its own ConcurrentBag verification too)
-            await complete(uploadId);
-
-            updateProgress(100);
-            progressBar.textContent = "100% - verified & done";
-            console.log("[UPLOAD] Complete and verified");
-        } catch (err) {
-            console.error("[UPLOAD] Failed:", err);
-            progressBar.textContent = "Error: " + (err.message || err);
-            progressBar.style.backgroundColor = "#dc3545";
-        } finally {
-            startBtn.disabled = false;
         }
+
+        async function worker() {
+            while (queue.length > 0) {
+                const item = queue.shift();
+                try {
+                    console.log("UPLOAD ID IS:", uploadId);
+                    await uploadChunk(uploadId, item.index, item.blob);
+                    uploaded++;
+                    updateProgress(Math.floor((uploaded / totalChunks) * 100));
+                } catch (e) {
+                    console.error("chunk error", item.index, e);
+                    item.retries++;
+                    if (item.retries <= 3) {
+                        queue.push(item);
+                        await new Promise(r => setTimeout(r, 500 * item.retries));
+                    } else {
+                        throw new Error(`Chunk ${item.index} failed after 3 retries`);
+                    }
+                }
+            }
+        }
+
+
+        const workers = Array.from({length: MAX_WORKERS}, () => worker());
+        await Promise.all(workers);
+
+        const result = await complete(uploadId);
+
+        updateProgress(100);
+        progressBar.textContent = "100% - done";
+
+        alert("UPLOAD COMPLETED!:" + uploaded);
+        console.log("[UPLOAD RESULT]", result);
+
     });
 };

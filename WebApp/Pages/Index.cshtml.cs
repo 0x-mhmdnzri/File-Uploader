@@ -11,7 +11,7 @@ public class IndexModel : PageModel
     public IndexModel(ILogger<IndexModel> logger, IConfiguration cfg)
     {
         _logger = logger;
-        ApiBase = cfg["ApiBase"] ?? "http://localhost:5073";
+        ApiBase = cfg["ApiBase"] ?? "https://localhost:7013";
     }
 
     public void OnGet()
