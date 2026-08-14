@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using WebApi.Domain;
 using WebApi.Domain.Events;
@@ -15,6 +16,10 @@ public class UploadService : IUploadService
     private readonly StorageOptions _options;
     private readonly IUploadMetrics _metrics;
     private readonly ILogger<UploadService> _logger;
+
+    // In-memory lock-free received tracking (disk remains source of truth on complete).
+    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<int, byte>> _received =
+        new();
 
     public UploadService(
         IUploadRepository repo,
@@ -82,6 +87,7 @@ public class UploadService : IUploadService
         };
 
         await _repo.AddAsync(session, ct);
+        _received[session.Id] = new ConcurrentDictionary<int, byte>();
         _metrics.RecordInitiated();
 
         _logger.LogInformation(
@@ -102,8 +108,11 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
-        // Best-effort update of the CSV for status/resume UI.
-        // Under high concurrency this can lose updates; CompleteAsync uses the filesystem as source of truth.
+        // Lock-free in-memory mark.
+        var map = _received.GetOrAdd(uploadId, static _ => new ConcurrentDictionary<int, byte>());
+        map.TryAdd(chunkIndex, 0);
+
+        // Best-effort CSV update for status/resume UI. Disk is authoritative on complete.
         session.MarkChunkReceived(chunkIndex);
         await _repo.UpdateAsync(session, ct);
         _metrics.RecordChunkUploaded();
@@ -123,33 +132,47 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
-        // Disk is the source of truth. Parallel MarkChunkReceivedAsync calls race on ReceivedChunksCsv
-        // and can under-count; the part files themselves are written independently and are reliable.
-        var onDisk = await _storage.GetExistingChunkIndexesAsync(uploadId, ct);
-        var receivedCount = onDisk.Count;
+        // Parallel verification: ConcurrentBag for missing + Interlocked size accumulation.
+        var (missing, bytesOnDisk) = await _storage.VerifyChunksParallelAsync(
+            uploadId, session.TotalChunks, ct);
 
-        if (receivedCount != session.TotalChunks)
+        if (missing.Count > 0)
         {
-            // Also surface which indexes are missing to help debugging / client resume.
-            var missing = Enumerable.Range(0, session.TotalChunks)
-                .Where(i => !onDisk.Contains(i))
-                .Take(20)
-                .ToArray();
-
+            var sample = missing.OrderBy(x => x).Take(20).ToArray();
             throw new InvalidOperationException(
-                $"Not all chunks received. Expected {session.TotalChunks}, got {receivedCount} on disk. " +
-                $"Missing (sample): [{string.Join(", ", missing)}]");
+                $"Not all chunks received. Expected {session.TotalChunks}, missing {missing.Count}. " +
+                $"Missing (sample): [{string.Join(", ", sample)}]");
+        }
+
+        if (bytesOnDisk != session.TotalSize)
+        {
+            throw new InvalidOperationException(
+                $"On-disk size mismatch. Expected {session.TotalSize} bytes, got {bytesOnDisk}.");
         }
 
         // Keep CSV in sync for status endpoint consumers.
-        session.ReceivedChunksCsv = string.Join(',', onDisk.OrderBy(x => x));
+        if (_received.TryGetValue(uploadId, out var map) && !map.IsEmpty)
+        {
+            session.ReceivedChunksCsv = string.Join(',', map.Keys.OrderBy(x => x));
+        }
+        else
+        {
+            session.ReceivedChunksCsv = string.Join(',', Enumerable.Range(0, session.TotalChunks));
+        }
 
         var expectedChecksum = NormalizeChecksum(checksum) ?? session.Checksum;
 
         string finalPath;
         try
         {
-            finalPath = await _storage.MergeAsync(uploadId, session.FileName, session.TotalChunks, ct);
+            // Pre-allocated final file + parallel offset writes (no global merge lock).
+            finalPath = await _storage.MergeAsync(
+                uploadId,
+                session.FileName,
+                session.TotalChunks,
+                session.TotalSize,
+                session.ChunkSize,
+                ct);
         }
         catch (Exception ex)
         {
@@ -217,6 +240,8 @@ public class UploadService : IUploadService
         await _repo.UpdateAsync(session, ct);
         _metrics.RecordCompleted(session.TotalSize);
 
+        _received.TryRemove(uploadId, out _);
+
         _logger.LogInformation(
             "Upload completed {UploadId} → {FinalFileName}",
             session.Id, session.FinalFileName);
@@ -237,6 +262,7 @@ public class UploadService : IUploadService
         session.Status = UploadStatus.Aborted;
         await _repo.UpdateAsync(session, ct);
         await _storage.DeleteTempFolderAsync(uploadId, ct);
+        _received.TryRemove(uploadId, out _);
         _metrics.RecordAborted();
 
         _logger.LogInformation("Upload aborted {UploadId}", uploadId);

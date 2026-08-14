@@ -1,19 +1,31 @@
+using System.Buffers;
+using System.Collections.Concurrent;
+using System.Threading;
 using Microsoft.Extensions.Options;
 using WebApi.Interfaces;
 
 namespace WebApi.Storages;
 
-public class FileSystemStorage : IFileStorage
+public sealed class FileSystemStorage : IFileStorage, IDisposable
 {
     private readonly StorageOptions _options;
     private readonly IFileHasher _hasher;
+    private readonly SemaphoreSlim _diskGate;
     private const int BufferSize = 1 * 1024 * 1024; // 1 MB
 
     public FileSystemStorage(IOptions<StorageOptions> options, IFileHasher hasher)
     {
         _options = options.Value;
         _hasher = hasher;
+
+        var maxIo = _options.MaxConcurrentDiskIo > 0
+            ? _options.MaxConcurrentDiskIo
+            : Math.Clamp(Environment.ProcessorCount, 2, 16);
+
+        _diskGate = new SemaphoreSlim(maxIo, maxIo);
     }
+
+    public void Dispose() => _diskGate.Dispose();
 
     public Task EnsureDirectoriesAsync(CancellationToken ct = default)
     {
@@ -24,23 +36,52 @@ public class FileSystemStorage : IFileStorage
 
     public async Task SaveChunkAsync(Guid uploadId, int chunkIndex, Stream data, CancellationToken ct = default)
     {
-        var folder = Path.Combine(_options.TempPath, uploadId.ToString());
-        Directory.CreateDirectory(folder);
+        await _diskGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var folder = Path.Combine(_options.TempPath, uploadId.ToString());
+            Directory.CreateDirectory(folder);
 
-        var filePath = Path.Combine(folder, $"{uploadId}.part{chunkIndex}");
+            var filePath = Path.Combine(folder, $"{uploadId}.part{chunkIndex}");
 
-        await using var fs = new FileStream(
-            filePath,
-            FileMode.Create,
-            FileAccess.Write,
-            FileShare.None,
-            bufferSize: BufferSize,
-            useAsync: true);
+            // Rent a buffer from ArrayPool to avoid LOH / GC pressure on large copies.
+            var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+            try
+            {
+                await using var fs = new FileStream(
+                    filePath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: BufferSize,
+                    useAsync: true);
 
-        await data.CopyToAsync(fs, BufferSize, ct);
+                int read;
+                while ((read = await data.ReadAsync(buffer.AsMemory(0, BufferSize), ct).ConfigureAwait(false)) > 0)
+                {
+                    await fs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                }
+
+                await fs.FlushAsync(ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        finally
+        {
+            _diskGate.Release();
+        }
     }
 
-    public async Task<string> MergeAsync(Guid uploadId, string fileName, int totalChunks, CancellationToken ct = default)
+    public async Task<string> MergeAsync(
+        Guid uploadId,
+        string fileName,
+        int totalChunks,
+        long totalSize,
+        int chunkSize,
+        CancellationToken ct = default)
     {
         var folder = Path.Combine(_options.TempPath, uploadId.ToString());
         Directory.CreateDirectory(_options.FinalPath);
@@ -55,37 +96,82 @@ public class FileSystemStorage : IFileStorage
             finalPath = Path.Combine(_options.FinalPath, $"{nameWithoutExt}_{uploadId:N}{ext}");
         }
 
-        await using (var finalFs = new FileStream(
+        // Pre-allocate exact size so each worker can seek + write independently.
+        await using (var pre = new FileStream(
                          finalPath,
                          FileMode.Create,
                          FileAccess.Write,
                          FileShare.None,
-                         bufferSize: BufferSize,
+                         bufferSize: 4096,
                          useAsync: true))
         {
-            for (var i = 0; i < totalChunks; i++)
-            {
-                ct.ThrowIfCancellationRequested();
+            pre.SetLength(totalSize);
+            await pre.FlushAsync(ct).ConfigureAwait(false);
+        }
 
+        var parallelism = Math.Max(1, _options.MergeParallelism);
+        var options = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = parallelism,
+            CancellationToken = ct
+        };
+
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, totalChunks),
+            options,
+            async (i, token) =>
+            {
                 var partPath = Path.Combine(folder, $"{uploadId}.part{i}");
                 if (!File.Exists(partPath))
                     throw new InvalidOperationException($"Missing chunk {i} for upload {uploadId}");
 
-                await using var partFs = new FileStream(
-                    partPath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    bufferSize: BufferSize,
-                    useAsync: true);
+                var offset = (long)i * chunkSize;
 
-                await partFs.CopyToAsync(finalFs, BufferSize, ct);
-            }
+                await _diskGate.WaitAsync(token).ConfigureAwait(false);
+                try
+                {
+                    var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+                    try
+                    {
+                        await using var partFs = new FileStream(
+                            partPath,
+                            FileMode.Open,
+                            FileAccess.Read,
+                            FileShare.Read,
+                            bufferSize: BufferSize,
+                            useAsync: true);
 
-            await finalFs.FlushAsync(ct);
-        }
+                        // Concurrent writers on the same pre-sized file at non-overlapping offsets.
+                        await using var finalFs = new FileStream(
+                            finalPath,
+                            FileMode.Open,
+                            FileAccess.Write,
+                            FileShare.ReadWrite,
+                            bufferSize: BufferSize,
+                            useAsync: true);
 
-        await DeleteTempFolderAsync(uploadId, ct);
+                        finalFs.Seek(offset, SeekOrigin.Begin);
+
+                        int read;
+                        while ((read = await partFs.ReadAsync(buffer.AsMemory(0, BufferSize), token).ConfigureAwait(false)) > 0)
+                        {
+                            await finalFs.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+                        }
+
+                        await finalFs.FlushAsync(token).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    }
+                }
+                finally
+                {
+                    _diskGate.Release();
+                }
+            }).ConfigureAwait(false);
+
+        await DeleteTempFolderAsync(uploadId, ct).ConfigureAwait(false);
 
         return finalPath;
     }
@@ -125,7 +211,7 @@ public class FileSystemStorage : IFileStorage
         var prefix = $"{uploadId}.part";
         var indexes = new List<int>();
 
-        foreach (var file in Directory.EnumerateFiles(folder, $"{prefix}*") )
+        foreach (var file in Directory.EnumerateFiles(folder, $"{prefix}*"))
         {
             ct.ThrowIfCancellationRequested();
 
@@ -139,5 +225,42 @@ public class FileSystemStorage : IFileStorage
         }
 
         return Task.FromResult<IReadOnlyCollection<int>>(indexes);
+    }
+
+    public async Task<(IReadOnlyCollection<int> Missing, long BytesOnDisk)> VerifyChunksParallelAsync(
+        Guid uploadId,
+        int totalChunks,
+        CancellationToken ct = default)
+    {
+        var folder = Path.Combine(_options.TempPath, uploadId.ToString());
+        var missing = new ConcurrentBag<int>();
+        long bytesOnDisk = 0;
+
+        var options = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Math.Max(1, _options.MergeParallelism),
+            CancellationToken = ct
+        };
+
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, totalChunks),
+            options,
+            (i, token) =>
+            {
+                var partPath = Path.Combine(folder, $"{uploadId}.part{i}");
+                if (!File.Exists(partPath))
+                {
+                    missing.Add(i);
+                }
+                else
+                {
+                    var len = new FileInfo(partPath).Length;
+                    Interlocked.Add(ref bytesOnDisk, len);
+                }
+
+                return ValueTask.CompletedTask;
+            }).ConfigureAwait(false);
+
+        return (missing, bytesOnDisk);
     }
 }

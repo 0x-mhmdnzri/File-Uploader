@@ -1,43 +1,48 @@
 using WebApi.Domain;
-using WebApi.Events;
 using WebApi.Interfaces;
 
 namespace WebApi.Services;
 
+/// <summary>
+/// Lightweight periodic marker for expired Pending sessions.
+/// Disk cleanup is owned by OrphanCleanupService; this only flips status when needed.
+/// </summary>
 public class UploadCleanupService : BackgroundService
 {
-    private readonly IServiceProvider _serviceProvider;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<UploadCleanupService> _logger;
-    private readonly TimeSpan _interval = TimeSpan.FromMinutes(1);
+    private readonly TimeSpan _interval = TimeSpan.FromMinutes(5);
 
-    public UploadCleanupService(IServiceProvider serviceProvider, ILogger<UploadCleanupService> logger)
+    public UploadCleanupService(IServiceScopeFactory scopeFactory, ILogger<UploadCleanupService> logger)
     {
-        _serviceProvider = serviceProvider;
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken);
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                using var scope = _serviceProvider.CreateScope();
+                using var scope = _scopeFactory.CreateScope();
                 var repo = scope.ServiceProvider.GetRequiredService<IUploadRepository>();
-                var eventBus = scope.ServiceProvider.GetRequiredService<IUploadEventBus>();
 
-                var now = DateTime.UtcNow;
-                var expired = await repo.GetExpiredPendingAsync(now);
+                var expired = await repo.GetExpiredPendingAsync(stoppingToken);
 
                 foreach (var session in expired)
                 {
+                    if (session.Status != UploadStatus.Pending)
+                        continue;
+
                     session.Status = UploadStatus.Expired;
-                    await repo.UpdateAsync(session);
-                    await eventBus.PublishAsync(new UploadEvent(session.Id, "Expired", session.ClientIp), stoppingToken);
-                    _logger.LogInformation("Expired upload session {UploadId}", session.Id);
+                    await repo.UpdateAsync(session, stoppingToken);
+                    _logger.LogInformation("Marked upload session {UploadId} as Expired", session.Id);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogError(ex, "Error during upload cleanup");
             }

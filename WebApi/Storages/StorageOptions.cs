@@ -51,4 +51,16 @@ public class StorageOptions
     /// Set to 0 or negative to disable.
     /// </summary>
     public int MaxPendingSessionsPerIp { get; set; } = 5;
+
+    /// <summary>
+    /// Global concurrent disk IO gate (SaveChunk + parallel merge workers).
+    /// Prevents FS thrashing under heavy parallel uploads.
+    /// Default: Environment.ProcessorCount (clamped 2–16).
+    /// </summary>
+    public int MaxConcurrentDiskIo { get; set; } = 0;
+
+    /// <summary>
+    /// Degree of parallelism for offset-based merge. Default 4.
+    /// </summary>
+    public int MergeParallelism { get; set; } = 4;
 }

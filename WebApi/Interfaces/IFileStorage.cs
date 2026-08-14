@@ -7,9 +7,16 @@ public interface IFileStorage
     Task SaveChunkAsync(Guid uploadId, int chunkIndex, Stream data, CancellationToken ct = default);
 
     /// <summary>
-    /// Sequentially merges all parts into the final file. Returns the final file path.
+    /// Pre-allocates the final file and writes each part at its byte offset in parallel.
+    /// Returns the final file path.
     /// </summary>
-    Task<string> MergeAsync(Guid uploadId, string fileName, int totalChunks, CancellationToken ct = default);
+    Task<string> MergeAsync(
+        Guid uploadId,
+        string fileName,
+        int totalChunks,
+        long totalSize,
+        int chunkSize,
+        CancellationToken ct = default);
 
     /// <summary>
     /// Computes SHA-256 of a file on disk and returns lowercase hex string.
@@ -29,4 +36,13 @@ public interface IFileStorage
     /// This is the source of truth under concurrent parallel uploads.
     /// </summary>
     Task<IReadOnlyCollection<int>> GetExistingChunkIndexesAsync(Guid uploadId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Parallel verification: discovers missing indexes and accumulates on-disk byte size.
+    /// Uses ConcurrentBag + Interlocked. Returns (missing indexes, total bytes found).
+    /// </summary>
+    Task<(IReadOnlyCollection<int> Missing, long BytesOnDisk)> VerifyChunksParallelAsync(
+        Guid uploadId,
+        int totalChunks,
+        CancellationToken ct = default);
 }
