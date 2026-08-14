@@ -1,9 +1,4 @@
 window.uploaderInit = function (apiBase) {
-<<<<<<< HEAD
-    console.log("[UPLOAD] init called with:", apiBase);
-
-=======
->>>>>>> origin/main
     const fileInput = document.getElementById('file');
     const startBtn = document.getElementById('start');
     const pauseBtn = document.getElementById('pause');
@@ -45,17 +40,9 @@ window.uploaderInit = function (apiBase) {
         progressBar.textContent = label || (p + '%');
     }
 
-<<<<<<< HEAD
-    // 16 MB is still optimal for most networks/disks
-    const CHUNK_SIZE = 16 * 1024 * 1024;
-
-    // More aggressive but still safe parallelism
-    const MAX_WORKERS = Math.min(Math.max(4, Math.floor(navigator.hardwareConcurrency)), 12);
-=======
     function setStatus(msg) {
         if (statusText) statusText.textContent = msg;
     }
->>>>>>> origin/main
 
     function setSpeed(mbps) {
         if (!speedText) return;
@@ -118,90 +105,6 @@ window.uploaderInit = function (apiBase) {
         fd.append('fileName', file.name);
         fd.append('totalSize', file.size);
         fd.append('chunkSize', CHUNK_SIZE);
-<<<<<<< HEAD
-        const r = await fetch(`${apiBase}/api/client/upload/initiate`, {method: 'POST', body: fd});
-        return await r.json();
-    }
-
-    async function uploadChunk(uploadId, index, blob) {
-        const url = `${apiBase}/api/client/upload/${uploadId}/chunk/${index}`;
-        const r = await fetch(url, {method: 'PUT', body: blob});
-        if (!r.ok) throw new Error("chunk failed " + index);
-    }
-
-    async function complete(uploadId) {
-        const r = await fetch(`${apiBase}/api/client/upload/${uploadId}/complete`, {method: 'POST'});
-        try {
-            return await r.json();   // انتظار JSON
-        } catch {
-            return {message: "Upload completed (no JSON returned)"};
-        }
-    }
-
-    async function status(uploadId) {
-        const r = await fetch(`${apiBase}/api/client/upload/${uploadId}/status`);
-        if (r.status === 404) return null;
-        if (!r.ok) throw new Error(`Status failed: ${r.status}`);
-        return await r.json();
-    }
-
-    // Simple concurrent-safe queue (mimics ConcurrentQueue + SemaphoreSlim)
-    function createWorkQueue(items, concurrency) {
-        let index = 0;
-        const results = new Array(items.length);
-        let active = 0;
-        let resolveAll, rejectAll;
-        const done = new Promise((res, rej) => { resolveAll = res; rejectAll = rej; });
-
-        function next() {
-            if (index >= items.length && active === 0) {
-                resolveAll(results);
-                return;
-            }
-            while (active < concurrency && index < items.length) {
-                const i = index++;
-                const item = items[i];
-                active++;
-                item()
-                    .then(r => { results[i] = r; })
-                    .catch(e => { rejectAll(e); })
-                    .finally(() => {
-                        active--;
-                        next();
-                    });
-            }
-        }
-        next();
-        return done;
-    }
-
-    startBtn.addEventListener('click', async () => {
-        const file = fileInput.files[0];
-        if (!file) return;
-
-        startBtn.disabled = true;
-        try {
-            console.log(`[UPLOAD] Starting ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB) with ${MAX_WORKERS} workers`);
-
-            const init = await initiate(file);
-            const uploadId = init.uploadId;
-            const totalChunks = init.totalChunks;
-
-            updateProgress(0);
-
-            // Resume support
-            const received = new Set();
-            const existing = await status(uploadId);
-            if (existing?.received) existing.received.forEach(i => received.add(i));
-
-            let uploaded = received.size;
-            updateProgress(Math.floor((uploaded / totalChunks) * 100));
-
-            // Build work items
-            const workItems = [];
-            for (let i = 0; i < totalChunks; i++) {
-                if (received.has(i)) continue;
-=======
         if (file.type) fd.append('contentType', file.type);
         if (checksum) fd.append('checksum', checksum);
 
@@ -284,15 +187,13 @@ window.uploaderInit = function (apiBase) {
 
         const received = new Set(alreadyReceived || []);
         uploadedCount = received.size;
->>>>>>> origin/main
 
+        const queue = [];
+        for (let i = 0; i < totalChunks; i++) {
+            if (!received.has(i)) {
                 const start = i * CHUNK_SIZE;
                 const end = Math.min(start + CHUNK_SIZE, file.size);
-<<<<<<< HEAD
-                queue.push({index: i, blob: file.slice(start, end), retries: 0});
-=======
                 queue.push({ index: i, start, end, retries: 0 });
->>>>>>> origin/main
             }
         }
 
@@ -321,12 +222,6 @@ window.uploaderInit = function (apiBase) {
                 if (!item) return;
 
                 try {
-<<<<<<< HEAD
-                    console.log("UPLOAD ID IS:", uploadId);
-                    await uploadChunk(uploadId, item.index, item.blob);
-                    uploaded++;
-                    updateProgress(Math.floor((uploaded / totalChunks) * 100));
-=======
                     const blob = file.slice(item.start, item.end);
                     await apiUploadChunk(uploadId, item.index, blob);
                     received.add(item.index);
@@ -334,7 +229,6 @@ window.uploaderInit = function (apiBase) {
                     noteBytes(item.end - item.start);
                     setProgress(Math.floor((uploadedCount / totalChunks) * 100));
                     setStatus(`Uploading ${uploadedCount}/${totalChunks} chunks`);
->>>>>>> origin/main
                 } catch (e) {
                     item.retries++;
                     if (item.retries <= 3 && !cancelRequested) {
@@ -347,20 +241,9 @@ window.uploaderInit = function (apiBase) {
             }
         }
 
-
-        const workers = Array.from({length: MAX_WORKERS}, () => worker());
+        const workers = Array.from({ length: MAX_WORKERS }, () => worker());
         await Promise.all(workers);
 
-<<<<<<< HEAD
-        const result = await complete(uploadId);
-
-        updateProgress(100);
-        progressBar.textContent = "100% - done";
-
-        alert("UPLOAD COMPLETED!:" + uploaded);
-        console.log("[UPLOAD RESULT]", result);
-
-=======
         if (cancelRequested) {
             setStatus('Cancelled');
             setState('idle');
@@ -446,7 +329,6 @@ window.uploaderInit = function (apiBase) {
 
     startBtn.addEventListener('click', () => {
         if (state === 'idle' || state === 'done' || state === 'error') startFresh();
->>>>>>> origin/main
     });
 
     if (pauseBtn) {

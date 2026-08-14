@@ -8,48 +8,24 @@ public class InMemoryUploadRepository : IUploadRepository
 {
     private readonly ConcurrentDictionary<Guid, UploadSession> _store = new();
 
-<<<<<<< HEAD
-    public Task AddAsync(UploadSession session)
-=======
     public Task AddAsync(UploadSession session, CancellationToken cancellationToken = default)
->>>>>>> origin/main
     {
         _store[session.Id] = session;
         return Task.CompletedTask;
     }
 
-<<<<<<< HEAD
-    public Task<UploadSession?> GetAsync(Guid id)
-=======
     public Task<UploadSession?> GetAsync(Guid id, CancellationToken cancellationToken = default)
->>>>>>> origin/main
     {
         _store.TryGetValue(id, out var session);
         return Task.FromResult(session);
     }
 
-<<<<<<< HEAD
-    public Task UpdateAsync(UploadSession session)
-=======
     public Task UpdateAsync(UploadSession session, CancellationToken cancellationToken = default)
->>>>>>> origin/main
     {
         _store[session.Id] = session;
         return Task.CompletedTask;
     }
 
-<<<<<<< HEAD
-    public Task DeleteAsync(Guid id)
-    {
-        _store.TryRemove(id, out _);
-        return Task.CompletedTask;
-    }
-
-    public Task<IReadOnlyList<UploadSession>> GetExpiredPendingAsync(DateTime utcNow)
-    {
-        var expired = _store.Values
-            .Where(s => s.Status == UploadStatus.Pending && s.ExpiresAt <= utcNow)
-=======
     public Task DeleteAsync(UploadSession session, CancellationToken cancellationToken = default)
     {
         _store.TryRemove(session.Id, out _);
@@ -61,26 +37,11 @@ public class InMemoryUploadRepository : IUploadRepository
         var now = DateTime.UtcNow;
         var expired = _store.Values
             .Where(s => s.Status == UploadStatus.Pending && s.ExpiresAt <= now)
->>>>>>> origin/main
             .ToList();
 
         return Task.FromResult<IReadOnlyList<UploadSession>>(expired);
     }
 
-<<<<<<< HEAD
-    public Task<int> CountActivePendingByIpAsync(string clientIp)
-    {
-        if (string.IsNullOrWhiteSpace(clientIp))
-            return Task.FromResult(0);
-
-        var count = _store.Values.Count(s =>
-            s.Status == UploadStatus.Pending &&
-            string.Equals(s.ClientIp, clientIp, StringComparison.OrdinalIgnoreCase));
-
-        return Task.FromResult(count);
-    }
-}
-=======
     public Task<int> CountActivePendingByIpAsync(string ip, CancellationToken cancellationToken = default)
     {
         var count = _store.Values.Count(s =>
@@ -90,4 +51,3 @@ public class InMemoryUploadRepository : IUploadRepository
         return Task.FromResult(count);
     }
 }
->>>>>>> origin/main
