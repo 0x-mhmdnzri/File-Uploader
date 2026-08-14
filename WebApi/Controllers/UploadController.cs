@@ -139,6 +139,7 @@ public class UploadController : ControllerBase
 
     /// <summary>
     /// Get current status and list of received chunks (for resume).
+    /// Uses filesystem as source of truth so parallel uploads don't under-report.
     /// </summary>
     [HttpGet("{uploadId:guid}/status")]
     public async Task<IActionResult> Status(
@@ -149,7 +150,9 @@ public class UploadController : ControllerBase
         if (session is null)
             return NotFound();
 
-        var received = session.GetReceivedChunks().OrderBy(x => x).ToArray();
+        // Disk is authoritative under concurrent parallel chunk uploads.
+        var onDisk = await _storage.GetExistingChunkIndexesAsync(uploadId, ct);
+        var received = onDisk.OrderBy(x => x).ToArray();
 
         return Ok(new
         {
