@@ -1,4 +1,4 @@
-window.uploaderInit = function (apiBase) {
+window.uploaderInit = function (apiBase, apiKey) {
     const fileInput = document.getElementById('file');
     const startBtn = document.getElementById('start');
     const pauseBtn = document.getElementById('pause');
@@ -18,7 +18,8 @@ window.uploaderInit = function (apiBase) {
     const MIN_WORKERS = 2;
     const MAX_WORKERS_CAP = 6;
     const STORAGE_KEY = 'fileUploaderSession';
-    const HASH_SLICE = 2 * 1024 * 1024; // 2 MB — constant-memory streaming hash
+    const HASH_SLICE = 2 * 1024 * 1024;
+    const API_KEY = apiKey || '';
 
     /** @type {'idle'|'hashing'|'uploading'|'paused'|'verifying'|'done'|'error'} */
     let state = 'idle';
@@ -35,6 +36,12 @@ window.uploaderInit = function (apiBase) {
     let speedWindowStart = 0;
     let speedWindowBytes = 0;
     let recentMbps = [];
+
+    function authHeaders(extra) {
+        const h = Object.assign({}, extra || {});
+        if (API_KEY) h['X-Api-Key'] = API_KEY;
+        return h;
+    }
 
     function setProgress(percent, label) {
         const p = Math.max(0, Math.min(100, percent | 0));
@@ -103,7 +110,11 @@ window.uploaderInit = function (apiBase) {
         if (file.type) fd.append('contentType', file.type);
         if (checksum) fd.append('checksum', checksum);
 
-        const r = await fetch(`${apiBase}/api/uploads/initiate`, { method: 'POST', body: fd });
+        const r = await fetch(`${apiBase}/api/uploads/initiate`, {
+            method: 'POST',
+            headers: authHeaders(),
+            body: fd
+        });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(body.error || ('initiate failed: ' + r.status));
         return body;
@@ -124,8 +135,6 @@ window.uploaderInit = function (apiBase) {
         return ((crc ^ (-1)) >>> 0).toString(16).padStart(8, '0');
     }
 
-    // ---- Incremental SHA-256 (constant memory; no full-file buffer) ----
-    // FIPS 180-4 style pure JS compressor — processes 64-byte blocks.
     function createSha256() {
         const K = new Uint32Array([
             0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
@@ -172,7 +181,6 @@ window.uploaderInit = function (apiBase) {
         function update(u8) {
             let off = 0;
             const len = u8.length;
-            // bit length += len*8
             const bits = len * 8;
             totalBitsLo = (totalBitsLo + bits) >>> 0;
             if (totalBitsLo < bits) totalBitsHi++;
@@ -191,15 +199,8 @@ window.uploaderInit = function (apiBase) {
         }
 
         function hexDigest() {
-            // padding
-            const pad = new Uint8Array(64);
-            pad[0] = 0x80;
             const lenBits = totalBitsLo;
             const lenBitsHi = totalBitsHi;
-            // copy remaining
-            const tmp = new Uint8Array(bufLen);
-            tmp.set(buf.subarray(0, bufLen));
-            // re-run update path carefully — finalize without mutating shared state incorrectly
             let bl = bufLen;
             const block = new Uint8Array(64);
             block.set(buf.subarray(0, bl));
@@ -211,7 +212,6 @@ window.uploaderInit = function (apiBase) {
                 bl = 0;
             }
             while (bl < 56) block[bl++] = 0;
-            // 64-bit length big-endian
             block[56] = (lenBitsHi >>> 24) & 0xff;
             block[57] = (lenBitsHi >>> 16) & 0xff;
             block[58] = (lenBitsHi >>> 8) & 0xff;
@@ -239,7 +239,7 @@ window.uploaderInit = function (apiBase) {
     }
 
     async function apiUploadChunk(uploadId, index, blob) {
-        const headers = {};
+        const headers = authHeaders();
         let body = blob;
 
         if (requireChunkCrc32 || requireChunkSha256) {
@@ -264,24 +264,32 @@ window.uploaderInit = function (apiBase) {
     async function apiComplete(uploadId, checksum) {
         const fd = new FormData();
         if (checksum) fd.append('checksum', checksum);
-        const r = await fetch(`${apiBase}/api/uploads/${uploadId}/complete`, { method: 'POST', body: fd });
+        const r = await fetch(`${apiBase}/api/uploads/${uploadId}/complete`, {
+            method: 'POST',
+            headers: authHeaders(),
+            body: fd
+        });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(body.error || ('complete failed: ' + r.status));
         return body;
     }
 
     async function apiAbort(uploadId) {
-        await fetch(`${apiBase}/api/uploads/${uploadId}`, { method: 'DELETE' });
+        await fetch(`${apiBase}/api/uploads/${uploadId}`, {
+            method: 'DELETE',
+            headers: authHeaders()
+        });
     }
 
     async function apiStatus(uploadId) {
-        const r = await fetch(`${apiBase}/api/uploads/${uploadId}/status`);
+        const r = await fetch(`${apiBase}/api/uploads/${uploadId}/status`, {
+            headers: authHeaders()
+        });
         if (r.status === 404) return null;
         if (!r.ok) throw new Error('status failed: ' + r.status);
         return await r.json();
     }
 
-    /** True streaming SHA-256: O(HASH_SLICE) memory, any file size. */
     async function computeSha256Streaming(file) {
         setStatus('Computing checksum (streaming)...');
         setProgress(0, 'Hashing...');
@@ -297,7 +305,6 @@ window.uploaderInit = function (apiBase) {
             hasher.update(new Uint8Array(buf));
             offset = end;
             setProgress(Math.floor((offset / total) * 100), 'Hashing...');
-            // yield to UI
             await new Promise(r => setTimeout(r, 0));
         }
 
@@ -381,7 +388,6 @@ window.uploaderInit = function (apiBase) {
 
         async function workerOne() {
             while (!cancelRequested && !pauseRequested && !fatalError) {
-                // Shrink: if over target concurrency, exit this worker.
                 if (activeWorkers > adaptiveWorkers) return;
 
                 const item = queue.shift();
@@ -410,10 +416,8 @@ window.uploaderInit = function (apiBase) {
 
         pump();
 
-        // Wait until idle: no active workers and (queue empty or stopped).
         while (activeWorkers > 0 || (queue.length > 0 && !cancelRequested && !pauseRequested && !fatalError)) {
             if (fatalError) break;
-            // Allow scale-up mid-flight
             if (!cancelRequested && !pauseRequested && !fatalError) pump();
             await new Promise(r => setTimeout(r, 50));
         }
