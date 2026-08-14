@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using WebApi.Audit;
 using WebApi.Domain;
 using WebApi.Domain.Events;
 using WebApi.Interfaces;
@@ -14,6 +15,7 @@ public class UploadService : IUploadService
     private readonly IUploadEventPublisher _events;
     private readonly IReceivedChunkCache _receivedCache;
     private readonly ISessionCache _sessionCache;
+    private readonly IAuditLogger _audit;
     private readonly StorageOptions _options;
     private readonly IUploadMetrics _metrics;
     private readonly ILogger<UploadService> _logger;
@@ -24,6 +26,7 @@ public class UploadService : IUploadService
         IUploadEventPublisher events,
         IReceivedChunkCache receivedCache,
         ISessionCache sessionCache,
+        IAuditLogger audit,
         IOptions<StorageOptions> options,
         IUploadMetrics metrics,
         ILogger<UploadService> logger)
@@ -33,6 +36,7 @@ public class UploadService : IUploadService
         _events = events;
         _receivedCache = receivedCache;
         _sessionCache = sessionCache;
+        _audit = audit;
         _options = options.Value;
         _metrics = metrics;
         _logger = logger;
@@ -70,6 +74,8 @@ public class UploadService : IUploadService
             }
         }
 
+        await EnforceQuotaAsync(totalSize, clientIp, ct);
+
         await _storage.EnsureDirectoriesAsync(ct);
 
         var session = new UploadSession
@@ -91,6 +97,8 @@ public class UploadService : IUploadService
         _receivedCache.GetOrCreate(session.Id);
         _sessionCache.Set(session);
         _metrics.RecordInitiated();
+
+        _audit.UploadInitiated(session.Id, session.FileName, session.TotalSize, session.TotalChunks, clientIp);
 
         _logger.LogInformation(
             "Upload initiated {UploadId} for {FileName} ({TotalSize} bytes, {TotalChunks} chunks, ip={ClientIp})",
@@ -184,6 +192,7 @@ public class UploadService : IUploadService
             await _repo.UpdateAsync(session, ct);
             _sessionCache.Remove(uploadId);
             _metrics.RecordFailed();
+            _audit.UploadFailed(uploadId, session.FileName, "merge_failed", session.ClientIp);
             await SafePublishFailedAsync(session, "merge_failed", ct);
             throw;
         }
@@ -202,6 +211,7 @@ public class UploadService : IUploadService
                 await _repo.UpdateAsync(session, ct);
                 _sessionCache.Remove(uploadId);
                 _metrics.RecordFailed();
+                _audit.UploadFailed(uploadId, session.FileName, "checksum_mismatch", session.ClientIp);
                 await SafePublishFailedAsync(session, "checksum_mismatch", ct);
 
                 throw new InvalidOperationException(
@@ -220,6 +230,10 @@ public class UploadService : IUploadService
 
         _receivedCache.Remove(uploadId);
         _sessionCache.Remove(uploadId);
+
+        _audit.UploadCompleted(
+            session.Id, session.FileName, session.FinalFileName ?? session.FileName,
+            session.TotalSize, session.ClientIp);
 
         _logger.LogInformation(
             "Upload completed {UploadId} → {FinalFileName}",
@@ -245,6 +259,7 @@ public class UploadService : IUploadService
         _sessionCache.Remove(uploadId);
         _metrics.RecordAborted();
 
+        _audit.UploadAborted(uploadId, session.FileName, session.ClientIp);
         _logger.LogInformation("Upload aborted {UploadId}", uploadId);
 
         try
@@ -267,6 +282,37 @@ public class UploadService : IUploadService
         if (session is not null)
             _sessionCache.Set(session);
         return session;
+    }
+
+    private async Task EnforceQuotaAsync(long totalSize, string? clientIp, CancellationToken ct)
+    {
+        if (_options.MaxTotalStoredBytes > 0)
+        {
+            var completed = await _repo.SumCompletedBytesAsync(ct);
+            var pending = await _repo.SumActivePendingBytesAsync(ct);
+            var used = completed + pending;
+            if (used + totalSize > _options.MaxTotalStoredBytes)
+            {
+                var reason =
+                    $"Global storage quota exceeded. Used≈{used} bytes, limit={_options.MaxTotalStoredBytes}, requested={totalSize}.";
+                _audit.QuotaRejected(clientIp, reason, totalSize);
+                throw new InvalidOperationException(reason);
+            }
+        }
+
+        if (_options.MaxStoredBytesPerIp > 0 && !string.IsNullOrWhiteSpace(clientIp))
+        {
+            var completedIp = await _repo.SumCompletedBytesByIpAsync(clientIp, ct);
+            var pendingIp = await _repo.SumActivePendingBytesByIpAsync(clientIp, ct);
+            var usedIp = completedIp + pendingIp;
+            if (usedIp + totalSize > _options.MaxStoredBytesPerIp)
+            {
+                var reason =
+                    $"Per-IP storage quota exceeded. Used≈{usedIp} bytes, limit={_options.MaxStoredBytesPerIp}, requested={totalSize}.";
+                _audit.QuotaRejected(clientIp, reason, totalSize);
+                throw new InvalidOperationException(reason);
+            }
+        }
     }
 
     private async Task<UploadSession?> GetSessionHotAsync(Guid uploadId, CancellationToken ct)

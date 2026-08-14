@@ -22,21 +22,26 @@ public class StorageOptions
 
     public int MaxPendingSessionsPerIp { get; set; } = 5;
 
+    /// <summary>
+    /// Global max stored bytes (Completed + active Pending reserved). 0 = unlimited.
+    /// Default 200 GB.
+    /// </summary>
+    public long MaxTotalStoredBytes { get; set; } = 200L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// Per-IP max stored bytes (Completed + active Pending). 0 = unlimited.
+    /// Default 50 GB.
+    /// </summary>
+    public long MaxStoredBytesPerIp { get; set; } = 50L * 1024 * 1024 * 1024;
+
     public int MaxConcurrentDiskIo { get; set; } = 0;
 
     public int MergeParallelism { get; set; } = 4;
 
     public bool SinglePassMergeAndHash { get; set; } = false;
 
-    /// <summary>
-    /// When true, require X-Chunk-CRC32 and reject mismatches (deletes bad part).
-    /// </summary>
     public bool RequireChunkCrc32 { get; set; } = false;
 
-    /// <summary>
-    /// When true, require X-Chunk-SHA256 (64 hex) and reject mismatches (deletes bad part).
-    /// Stronger than CRC32; costs one SHA-256 over each chunk body on the server.
-    /// </summary>
     public bool RequireChunkSha256 { get; set; } = false;
 
     public int SessionCacheTtlSeconds { get; set; } = 30;

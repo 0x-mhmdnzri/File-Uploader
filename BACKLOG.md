@@ -1,37 +1,24 @@
 # BACKLOG — File Uploader (personal file service)
 
-Last updated: 2026-08-14 (`dev`) — P1 client/integrity polish closed.
+Last updated: 2026-08-14 (`dev`) — P2 product/ops closed in code.
 
 ---
 
 ## Done
 
-### Core + concurrency + P0 harden
-- [x] Chunked parallel upload, resume, orphan cleanup
-- [x] Disk IO gate, ArrayPool, parallel/single-pass merge, session cache
-- [x] StorageBench, CRC delete on mismatch, part/final length checks
-- [x] Obsolete cleanup service removed
+### P0 / P1 (prior)
+- [x] Parallel upload stack, merge modes, StorageBench, CRC/SHA chunk integrity
+- [x] Streaming client SHA-256, mid-flight adaptive workers
 
-### P1 — client and integrity polish (2026-08-14)
-- [x] R4 — Constant-memory streaming client SHA-256 (incremental pure JS, 2 MB slices, any file size)
-- [x] R5 — Mid-flight adaptive worker pool (`pump` scales active workers toward `adaptiveWorkers`)
-- [x] R7 — Optional `X-Chunk-SHA256` + `RequireChunkSha256` (tee + IncrementalHash; delete part on mismatch)
-
-### Also done earlier
-- [x] Optional CRC32, decompression, Channel events, webhook
+### P2 — product / ops (2026-08-14)
+- [x] R8 — API key auth (`Auth:Enabled`, `X-Api-Key`, fixed-time compare; health/swagger anonymous)
+- [x] R9 — Structured audit logger (`IAuditLogger` / Serilog `EventType=Upload*` + `logs/audit-*.log`)
+- [x] R10 — Storage quotas: `MaxTotalStoredBytes`, `MaxStoredBytesPerIp` (Completed + active Pending reserved)
+- [x] R11 — Bench docs/templates; host must paste measured numbers into `docs/BENCH.md` (no fabricated timings)
 
 ---
 
 ## Remaining
-
-### P2 — product / ops
-
-| ID | Task |
-|----|------|
-| R8 | AuthN/AuthZ on API |
-| R9 | Structured audit log |
-| R10 | Storage quota beyond pending sessions |
-| R11 | Fill README/BENCH tables with measured host numbers |
 
 ### P3 — deferred
 
@@ -44,19 +31,31 @@ Last updated: 2026-08-14 (`dev`) — P1 client/integrity polish closed.
 
 ---
 
-## Config (integrity)
+## Enable auth
 
 ```json
-"StorageOptions": {
-  "RequireChunkCrc32": false,
-  "RequireChunkSha256": false
+"Auth": {
+  "Enabled": true,
+  "ApiKey": "your-long-random-secret",
+  "HeaderName": "X-Api-Key"
 }
 ```
 
-Enable `RequireChunkSha256` when you want crypto-strength per-chunk rejection (higher CPU).
+WebApp:
 
-## Bench
-
-```bash
-dotnet run -c Release --project tools/StorageBench -- --size-mb 256 --chunk-mb 16 --parallelism 4 --rounds 3
+```json
+"ApiKey": "your-long-random-secret"
 ```
+
+Prefer env: `Auth__ApiKey`, `ApiKey`.
+
+## Quotas
+
+```json
+"StorageOptions": {
+  "MaxTotalStoredBytes": 214748364800,
+  "MaxStoredBytesPerIp": 53687091200
+}
+```
+
+Set to `0` to disable a limit.

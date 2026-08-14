@@ -50,8 +50,9 @@
     <script src="~/js/upload.js"></script>
     <script>
         const apiBase = '@Model.ApiBase';
+        const apiKey = '@Model.ApiKey';
         window.addEventListener("DOMContentLoaded", () => {
-            if (window.uploaderInit) window.uploaderInit(apiBase);
+            if (window.uploaderInit) window.uploaderInit(apiBase, apiKey);
             else console.error("uploaderInit NOT FOUND");
         });
     </script>

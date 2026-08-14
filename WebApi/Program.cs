@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Serilog;
+using WebApi.Audit;
+using WebApi.Auth;
 using WebApi.BackgroundServices;
 using WebApi.Data;
 using WebApi.Events;
@@ -30,7 +32,13 @@ try
             path: "logs/uploader-.log",
             rollingInterval: RollingInterval.Day,
             retainedFileCountLimit: 14,
-            shared: true));
+            shared: true)
+        .WriteTo.File(
+            path: "logs/audit-.log",
+            rollingInterval: RollingInterval.Day,
+            retainedFileCountLimit: 30,
+            shared: true,
+            restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information));
 
     builder.Services.AddControllers();
     builder.Services.AddEndpointsApiExplorer();
@@ -40,6 +48,8 @@ try
         builder.Configuration.GetSection(StorageOptions.SectionName));
     builder.Services.Configure<WebhookOptions>(
         builder.Configuration.GetSection(WebhookOptions.SectionName));
+    builder.Services.Configure<AuthOptions>(
+        builder.Configuration.GetSection(AuthOptions.SectionName));
 
     var connectionString = builder.Configuration.GetConnectionString("Default")
                            ?? "Data Source=uploads.db";
@@ -57,6 +67,7 @@ try
         var ttl = TimeSpan.FromSeconds(Math.Max(5, opts.SessionCacheTtlSeconds));
         return new SessionCache(ttl);
     });
+    builder.Services.AddSingleton<IAuditLogger, SerilogAuditLogger>();
     builder.Services.AddScoped<IUploadService, UploadService>();
     builder.Services.AddSingleton<IUploadMetrics, UploadMetrics>();
 
@@ -69,7 +80,6 @@ try
     builder.Services.AddSingleton<IUploadEventHandler>(sp =>
         sp.GetRequiredService<WebhookUploadEventHandler>());
 
-    // Single cleanup path
     builder.Services.AddHostedService<OrphanCleanupService>();
 
     builder.Services.AddHealthChecks()
@@ -119,6 +129,7 @@ try
 
     app.UseRouting();
     app.UseCors("AllowFrontend");
+    app.UseMiddleware<ApiKeyMiddleware>();
     app.MapControllers();
 
     app.MapHealthChecks("/health");
