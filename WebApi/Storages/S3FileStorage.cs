@@ -118,12 +118,9 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
         var safeName = Path.GetFileName(fileName);
         var key = FinalKey(safeName);
 
-        // Avoid overwrite: if exists, uniquify
         if (await ObjectExistsAsync(key, ct).ConfigureAwait(false))
             key = FinalKey($"{Path.GetFileNameWithoutExtension(safeName)}_{uploadId:N}{Path.GetExtension(safeName)}");
 
-        // Stream parts in order into a temp local file for hash+upload (portable path).
-        // For very large files prefer SinglePassMergeAndHash semantics in-process.
         var tempLocal = Path.Combine(Path.GetTempPath(), $"s3-merge-{uploadId:N}.bin");
         try
         {
@@ -145,7 +142,9 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
                     {
                         ct.ThrowIfCancellationRequested();
                         var partKey = PartKey(uploadId, i);
-                        await using var part = await _s3.GetObjectAsync(_options.Bucket, partKey, ct)
+
+                        // GetObjectResponse implements IDisposable only (not IAsyncDisposable).
+                        using var part = await _s3.GetObjectAsync(_options.Bucket, partKey, ct)
                             .ConfigureAwait(false);
                         await using var partStream = part.ResponseStream;
 
@@ -167,7 +166,6 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
                     sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
                     var hex = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
 
-                    // Upload final
                     local.Position = 0;
                     var put = new PutObjectRequest
                     {
@@ -196,7 +194,6 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
 
     public async Task<string> ComputeSha256Async(string filePath, CancellationToken ct = default)
     {
-        // filePath may be s3://bucket/key or key
         var key = filePath.StartsWith("s3://", StringComparison.OrdinalIgnoreCase)
             ? filePath.Split('/', 4).Last()
             : filePath;
@@ -204,7 +201,7 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
         if (key.StartsWith(_options.Bucket + "/", StringComparison.Ordinal))
             key = key[(_options.Bucket.Length + 1)..];
 
-        await using var obj = await _s3.GetObjectAsync(_options.Bucket, key, ct).ConfigureAwait(false);
+        using var obj = await _s3.GetObjectAsync(_options.Bucket, key, ct).ConfigureAwait(false);
         await using var stream = obj.ResponseStream;
         return await _hasher.ComputeSha256Async(stream, ct).ConfigureAwait(false);
     }
@@ -232,7 +229,7 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
                 await _s3.DeleteObjectsAsync(del, ct).ConfigureAwait(false);
             }
 
-            token = list.IsTruncated ? list.NextContinuationToken : null;
+            token = list.IsTruncated == true ? list.NextContinuationToken : null;
         } while (token is not null);
     }
 
@@ -295,7 +292,7 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
                 }
             }
 
-            token = list.IsTruncated ? list.NextContinuationToken : null;
+            token = list.IsTruncated == true ? list.NextContinuationToken : null;
         } while (token is not null);
 
         return indexes;
