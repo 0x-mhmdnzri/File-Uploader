@@ -75,6 +75,14 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         }
     }
 
+    public Task DeleteChunkAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default)
+    {
+        var path = Path.Combine(_options.TempPath, uploadId.ToString(), $"{uploadId}.part{chunkIndex}");
+        if (File.Exists(path))
+            File.Delete(path);
+        return Task.CompletedTask;
+    }
+
     public Task<(string Path, string Sha256Hex)> MergeAsync(
         Guid uploadId,
         string fileName,
@@ -88,9 +96,6 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
             : MergeParallelThenHashAsync(uploadId, fileName, totalChunks, totalSize, chunkSize, ct);
     }
 
-    /// <summary>
-    /// Ordered copy of parts into final file while updating SHA-256 — one pass over part bytes.
-    /// </summary>
     private async Task<(string Path, string Sha256Hex)> MergeSinglePassAsync(
         Guid uploadId,
         string fileName,
@@ -100,7 +105,6 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
     {
         var folder = Path.Combine(_options.TempPath, uploadId.ToString());
         Directory.CreateDirectory(_options.FinalPath);
-
         var finalPath = ResolveFinalPath(uploadId, fileName);
 
         await _diskGate.WaitAsync(ct).ConfigureAwait(false);
@@ -120,6 +124,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                 finalFs.SetLength(totalSize);
 
                 using var sha = SHA256.Create();
+                long written = 0;
 
                 for (var i = 0; i < totalChunks; i++)
                 {
@@ -141,10 +146,18 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                     {
                         await finalFs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
                         sha.TransformBlock(buffer, 0, read, null, 0);
+                        written += read;
                     }
                 }
 
                 await finalFs.FlushAsync(ct).ConfigureAwait(false);
+
+                if (written != totalSize)
+                {
+                    throw new InvalidOperationException(
+                        $"Single-pass merge size mismatch. Expected {totalSize}, wrote {written}.");
+                }
+
                 sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
                 var hex = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
 
@@ -172,7 +185,6 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
     {
         var folder = Path.Combine(_options.TempPath, uploadId.ToString());
         Directory.CreateDirectory(_options.FinalPath);
-
         var finalPath = ResolveFinalPath(uploadId, fileName);
 
         await using (var pre = new FileStream(
@@ -194,6 +206,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
             CancellationToken = ct
         };
 
+        // Capture first failure from workers (Parallel.ForEachAsync surfaces one).
         await Parallel.ForEachAsync(
             Enumerable.Range(0, totalChunks),
             options,
@@ -204,6 +217,16 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                     throw new InvalidOperationException($"Missing chunk {i} for upload {uploadId}");
 
                 var offset = (long)i * chunkSize;
+                var partLen = new FileInfo(partPath).Length;
+                var expectedLen = i == totalChunks - 1
+                    ? totalSize - offset
+                    : chunkSize;
+
+                if (partLen != expectedLen)
+                {
+                    throw new InvalidOperationException(
+                        $"Chunk {i} length {partLen} != expected {expectedLen}.");
+                }
 
                 await _diskGate.WaitAsync(token).ConfigureAwait(false);
                 try
@@ -229,13 +252,21 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
 
                         finalFs.Seek(offset, SeekOrigin.Begin);
 
+                        long copied = 0;
                         int read;
                         while ((read = await partFs.ReadAsync(buffer.AsMemory(0, BufferSize), token).ConfigureAwait(false)) > 0)
                         {
                             await finalFs.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+                            copied += read;
                         }
 
                         await finalFs.FlushAsync(token).ConfigureAwait(false);
+
+                        if (copied != partLen)
+                        {
+                            throw new InvalidOperationException(
+                                $"Chunk {i} short write: copied {copied}, part length {partLen}.");
+                        }
                     }
                     finally
                     {
@@ -247,6 +278,14 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                     _diskGate.Release();
                 }
             }).ConfigureAwait(false);
+
+        // Post-condition: final length must match.
+        var finalInfo = new FileInfo(finalPath);
+        if (finalInfo.Length != totalSize)
+        {
+            throw new InvalidOperationException(
+                $"Parallel merge size mismatch. Expected {totalSize}, file length {finalInfo.Length}.");
+        }
 
         var sha256Hex = await _hasher.ComputeSha256Async(finalPath, ct).ConfigureAwait(false);
         await DeleteTempFolderAsync(uploadId, ct).ConfigureAwait(false);

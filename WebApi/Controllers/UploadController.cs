@@ -60,10 +60,6 @@ public class UploadController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Upload a single chunk. Optional Content-Encoding: gzip | deflate | br.
-    /// Optional header X-Chunk-CRC32 (hex) for early rejection.
-    /// </summary>
     [HttpPut("{uploadId:guid}/chunk/{index:int}")]
     [RequestSizeLimit(100_000_000)]
     public async Task<IActionResult> UploadChunk(
@@ -73,7 +69,6 @@ public class UploadController : ControllerBase
     {
         try
         {
-            // Validate before any disk write — avoids orphan parts.
             await _service.EnsureCanAcceptChunkAsync(uploadId, index, ct);
 
             var encoding = Request.Headers.ContentEncoding.ToString();
@@ -92,7 +87,7 @@ public class UploadController : ControllerBase
                 var actual = Convert.ToHexString(crc.GetCurrentHash()).ToLowerInvariant();
                 if (!ChunkCrc32.EqualsHex(expectedCrc, actual))
                 {
-                    // Best-effort: leave part; client should retry same index.
+                    await _storage.DeleteChunkAsync(uploadId, index, ct);
                     return BadRequest(new
                     {
                         error = $"Chunk CRC32 mismatch. Expected {expectedCrc}, got {actual}."
