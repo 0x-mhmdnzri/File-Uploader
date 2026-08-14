@@ -1,54 +1,39 @@
 # 📋 BACKLOG — File Uploader Adapter
 
 > این پروژه یک **آداپتر آپلود فایل** در معماری هگزاگونال است.
-> فقط مسئولیت **دریافت، ذخیره، resume و تکمیل فایل** را دارد — نه Identity، نه Gateway، نه بقیه سرویس‌ها.
+> فقط مسئولیت **دریافت، ذخیره، resume و تکمیل فایل** را دارد.
 
 ---
 
-## 🧭 محدوده مسئولیت (Bounded Context)
+## 🧭 محدوده مسئولیت
 
 ### ✅ داخل این آداپتر
+- Chunked / resumable upload
+- Storage پشت `IFileStorage`
+- Session lifecycle + orphan cleanup
+- Checksum اختیاری
+- محدودیت‌های پایه (حجم، extension، pending per IP)
+- Health / metrics سبک
+- **پورت خروجی رویداد** (`IUploadEventPublisher`) — بدون مالکیت منطق downstream
 
-| حوزه | توضیح |
-|------|--------|
-| Chunked / resumable upload | initiate, chunk, status, complete, abort |
-| Storage | FileSystem (قابل تعویض با `IFileStorage`) |
-| Session lifecycle | Pending → Completed / Expired / Aborted / Failed |
-| Orphan cleanup | TTL + BackgroundService |
-| Integrity | SHA-256 اختیاری |
-| محدودیت‌های پایه | حجم فایل، chunk، extension، pending per IP |
-| Health / metrics سبک | برای مانیتورینگ خود آداپتر |
-
-### ❌ خارج از این آداپتر (مالکیت سرویس/لایه دیگر)
-
-| موضوع | کجا باید باشد |
-|--------|----------------|
-| Authentication / JWT / User identity | Identity service یا API Gateway |
-| Authorization سطح دامنه (چه کسی به چه فایلی دسترسی دارد) | سرویس دامنه / Policy |
-| Rate limiting سراسری / WAF | API Gateway |
-| Virus scanning | آداپتر/سرویس جدا (رویداد بعد از complete) |
-| CDN / serving فایل نهایی | سرویس دانلود یا object edge |
-| Distributed multi-node coordination | فقط اگر واقعاً چند نود آپلود داشته باشیم |
-
-**نتیجه:** Auth را در این ریپو پیاده نمی‌کنیم مگر به‌صورت اختیاری و نازک (مثلاً API Key از Gateway) — و آن هم فقط اگر صریحاً لازم شود.
+### ❌ خارج از محدوده
+- Auth / JWT / Identity
+- Rate limit سطح Gateway
+- Virus scan / indexing (مصرف‌کننده رویداد)
+- CDN / ACL دانلود
 
 ---
 
-## ✅ وضعیت فعلی (داخل محدوده)
+## ✅ وضعیت فعلی
 
-- [x] Chunked Upload + Parallel Workers
-- [x] Resume (status + localStorage + UI دمو)
+- [x] Chunked Upload + Parallel Workers + Resume UI
 - [x] FileSystem storage + sequential merge
-- [x] لایه پورت/آداپتر تمیز (`IFileStorage`, `IUploadRepository`, `IUploadService`)
-- [x] EF Core + SQLite برای session
+- [x] پورت‌ها: `IFileStorage`, `IUploadRepository`, `IUploadService`, `IUploadEventPublisher`
 - [x] Pending → Completed / Expired / Aborted / Failed
-- [x] Orphan Cleanup BackgroundService
-- [x] Abort / Cancel
-- [x] مدیریت نام فایل تکراری
-- [x] Checksum SHA-256
-- [x] محدودیت‌های امنیتی پایه (حجم، extension، session per IP)
-- [x] Pause / Resume / سرعت (UI دمو)
+- [x] Orphan Cleanup
+- [x] Checksum SHA-256 + محدودیت‌های امنیتی پایه
 - [x] Serilog + `/health` + `/api/metrics`
+- [x] **رویدادهای Complete / Abort / Failed** (آداپتر پیش‌فرض: Logging)
 
 ---
 
@@ -56,47 +41,42 @@
 
 | موضوع | تصمیم |
 |-------|--------|
-| نقش در سیستم | **آداپتر آپلود** (نه مونولیت) |
+| نقش | آداپتر آپلود |
 | پروتکل | HTTP/2 + Chunked REST |
-| gRPC | ❌ برای آپلود مرورگر مناسب نیست |
-| Object Storage خارجی | ❌ فعلاً؛ پشت `IFileStorage` قابل افزودن |
-| Storage پیش‌فرض | FileSystem |
-| Auth | خارج از محدوده (Gateway / Identity) |
-| وضعیت فایل | Pending → Completed |
-| پاکسازی orphan | BackgroundJob + TTL |
-| Checksum | SHA-256 اختیاری |
+| Storage | FileSystem + `IFileStorage` |
+| رویداد خروجی | `IUploadEventPublisher` (جایگزین‌پذیر با bus) |
+| Auth | خارج از محدوده |
 
 ---
 
-## 🚀 Backlog (فقط موارد مرتبط با آداپتر)
+## 🚀 Backlog باقی‌مانده (اختیاری / آینده)
 
-### اولویت‌های ۱–۳ — ✅ انجام‌شده
+- [ ] آداپتر bus واقعی برای `IUploadEventPublisher` (Rabbit/Kafka/…) — در composition root میزبان
+- [ ] آداپتر storage جایگزین (S3-compatible) پشت همان `IFileStorage`
+- [ ] GPU-accelerated hashing — فقط اگر bottleneck واقعی شد
+- [ ] Brotli / Deflate per-chunk — فقط اگر bandwidth bottleneck شد
+- [ ] OpenTelemetry exporter — اگر پلتفرم observability مشترک دارید
 
-### 🟢 اولویت ۴ — بهبود آداپتر (اختیاری)
-
-- [ ] سخت‌تر کردن مرز پورت‌ها (مثلاً جدا کردن UI دمو از WebApi اگر لازم شد)
-- [ ] آداپتر storage جایگزین (مثلاً S3-compatible) پشت همان `IFileStorage` — فقط در صورت نیاز
-- [ ] رویداد بعد از complete (مثلاً publish به bus برای virus-scan / indexing) بدون مالکیت آن منطق
-- [ ] GPU-accelerated hashing (آینده، فقط اگر bottleneck واقعی شد)
-- [ ] Brotli / Deflate per-chunk compression (آینده، فقط اگر bandwidth bottleneck شد)
-- [ ] OpenTelemetry exporter سبک (اگر پلتفرم observability مشترک دارید)
-
-### ⛔ عمداً انجام نمی‌شود در این ریپو
-
-- JWT / Login / User management
-- Rate limiting سطح پلتفرم
+### ⛔ عمداً انجام نمی‌شود
+- JWT / User management
 - Virus engine داخل همین process
-- سرویس دانلود / ACL فایل
+- Rate limiting سطح پلتفرم
 
 ---
 
-## 📌 Observability (سبک، برای خود آداپتر)
+## 📌 پورت رویداد (Outbound)
 
-| Endpoint | توضیح |
-|----------|--------|
-| `GET /health` | process + DB + storage |
-| `GET /api/metrics` | شمارنده‌های in-process |
+| رویداد | زمان |
+|--------|------|
+| `UploadCompletedEvent` | بعد از merge + mark Completed |
+| `UploadAbortedEvent` | بعد از abort |
+| `UploadFailedEvent` | merge/checksum fail |
+
+آداپتر پیش‌فرض: `LoggingUploadEventPublisher`  
+برای fan-out: `CompositeUploadEventPublisher`
+
+شکست publish **نباید** آپلود را fail کند.
 
 ---
 
-*آخرین به‌روزرسانی: هم‌راستاسازی با معماری هگزاگونال — فقط وظیفه آپلود.*
+*آخرین به‌روزرسانی: پورت خروجی رویدادهای lifecycle — محدوده هگزاگونال تکمیل‌تر شد.*

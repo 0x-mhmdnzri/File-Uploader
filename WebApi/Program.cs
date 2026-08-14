@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Serilog;
 using WebApi.BackgroundServices;
 using WebApi.Data;
+using WebApi.Events;
 using WebApi.Health;
 using WebApi.Interfaces;
 using WebApi.Metrics;
@@ -49,9 +50,11 @@ try
     builder.Services.AddScoped<IUploadService, UploadService>();
     builder.Services.AddSingleton<IUploadMetrics, UploadMetrics>();
 
+    // Outbound port: default logging adapter (replace/add bus adapter in composition root)
+    builder.Services.AddSingleton<IUploadEventPublisher, LoggingUploadEventPublisher>();
+
     builder.Services.AddHostedService<OrphanCleanupService>();
 
-    // Health checks: process, database, storage directories
     builder.Services.AddHealthChecks()
         .AddDbContextCheck<AppDbContext>("database")
         .AddCheck<StorageHealthCheck>("storage");
@@ -79,7 +82,6 @@ try
         await db.Database.EnsureCreatedAsync();
     }
 
-    // Structured request logging
     app.UseSerilogRequestLogging(opts =>
     {
         opts.MessageTemplate =

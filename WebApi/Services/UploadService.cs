@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using WebApi.Domain;
+using WebApi.Domain.Events;
 using WebApi.Interfaces;
 using WebApi.Metrics;
 using WebApi.Storages;
@@ -10,6 +11,7 @@ public class UploadService : IUploadService
 {
     private readonly IUploadRepository _repo;
     private readonly IFileStorage _storage;
+    private readonly IUploadEventPublisher _events;
     private readonly StorageOptions _options;
     private readonly IUploadMetrics _metrics;
     private readonly ILogger<UploadService> _logger;
@@ -17,12 +19,14 @@ public class UploadService : IUploadService
     public UploadService(
         IUploadRepository repo,
         IFileStorage storage,
+        IUploadEventPublisher events,
         IOptions<StorageOptions> options,
         IUploadMetrics metrics,
         ILogger<UploadService> logger)
     {
         _repo = repo;
         _storage = storage;
+        _events = events;
         _options = options.Value;
         _metrics = metrics;
         _logger = logger;
@@ -137,6 +141,7 @@ public class UploadService : IUploadService
             session.Status = UploadStatus.Failed;
             await _repo.UpdateAsync(session, ct);
             _metrics.RecordFailed();
+            await SafePublishFailedAsync(session, "merge_failed", ct);
             throw;
         }
 
@@ -154,6 +159,7 @@ public class UploadService : IUploadService
                 session.Status = UploadStatus.Failed;
                 await _repo.UpdateAsync(session, ct);
                 _metrics.RecordFailed();
+                await SafePublishFailedAsync(session, "checksum_compute_failed", ct);
                 throw;
             }
 
@@ -168,6 +174,7 @@ public class UploadService : IUploadService
                 session.Checksum = actualChecksum;
                 await _repo.UpdateAsync(session, ct);
                 _metrics.RecordFailed();
+                await SafePublishFailedAsync(session, "checksum_mismatch", ct);
 
                 throw new InvalidOperationException(
                     $"Checksum mismatch. Expected {expectedChecksum}, got {actualChecksum}");
@@ -198,6 +205,8 @@ public class UploadService : IUploadService
             "Upload completed {UploadId} → {FinalFileName}",
             session.Id, session.FinalFileName);
 
+        await SafePublishCompletedAsync(session, ct);
+
         return finalPath;
     }
 
@@ -215,11 +224,61 @@ public class UploadService : IUploadService
         _metrics.RecordAborted();
 
         _logger.LogInformation("Upload aborted {UploadId}", uploadId);
+
+        try
+        {
+            await _events.PublishAbortedAsync(new UploadAbortedEvent(
+                session.Id,
+                session.FileName,
+                session.ClientIp,
+                DateTime.UtcNow), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish UploadAborted for {UploadId}", uploadId);
+        }
     }
 
     public Task<UploadSession?> GetStatusAsync(Guid uploadId, CancellationToken ct = default)
     {
         return _repo.GetAsync(uploadId, ct);
+    }
+
+    private async Task SafePublishCompletedAsync(UploadSession session, CancellationToken ct)
+    {
+        try
+        {
+            await _events.PublishCompletedAsync(new UploadCompletedEvent(
+                session.Id,
+                session.FileName,
+                session.FinalFileName ?? session.FileName,
+                session.TotalSize,
+                session.ContentType,
+                session.Checksum,
+                session.ClientIp,
+                session.CompletedAt ?? DateTime.UtcNow), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish UploadCompleted for {UploadId}", session.Id);
+        }
+    }
+
+    private async Task SafePublishFailedAsync(UploadSession session, string reason, CancellationToken ct)
+    {
+        try
+        {
+            await _events.PublishFailedAsync(new UploadFailedEvent(
+                session.Id,
+                session.FileName,
+                reason,
+                session.ClientIp,
+                DateTime.UtcNow), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish UploadFailed for {UploadId}", session.Id);
+        }
     }
 
     private void ValidateFileSize(long totalSize)
