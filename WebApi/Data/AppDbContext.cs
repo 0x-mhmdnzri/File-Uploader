@@ -28,6 +28,11 @@ public class AppDbContext : DbContext
             .HasConversion<int>()
             .IsRequired();
 
+        entity.Property(x => x.Version)
+            .IsConcurrencyToken()
+            .IsRequired()
+            .HasDefaultValue(0);
+
         entity.Property(x => x.ReceivedChunksCsv)
             .HasMaxLength(8000);
 

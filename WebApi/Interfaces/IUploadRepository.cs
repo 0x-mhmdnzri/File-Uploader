@@ -13,20 +13,27 @@ public interface IUploadRepository
 
     Task<int> CountActivePendingByIpAsync(string clientIp, CancellationToken ct = default);
 
-    /// <summary>
-    /// Sum of TotalSize for Completed sessions (global stored data accounting).
-    /// </summary>
     Task<long> SumCompletedBytesAsync(CancellationToken ct = default);
-
-    /// <summary>
-    /// Sum of TotalSize for Completed sessions from a client IP.
-    /// </summary>
     Task<long> SumCompletedBytesByIpAsync(string clientIp, CancellationToken ct = default);
+    Task<long> SumActivePendingBytesAsync(CancellationToken ct = default);
+    Task<long> SumActivePendingBytesByIpAsync(string clientIp, CancellationToken ct = default);
 
     /// <summary>
-    /// Sum of TotalSize for active Pending sessions (reserved quota).
+    /// CAS: Pending → Completing. Returns true if this caller won the merge lease.
     /// </summary>
-    Task<long> SumActivePendingBytesAsync(CancellationToken ct = default);
+    Task<bool> TryBeginCompleteAsync(Guid id, CancellationToken ct = default);
 
-    Task<long> SumActivePendingBytesByIpAsync(string clientIp, CancellationToken ct = default);
+    /// <summary>
+    /// CAS: Completing → Completed (with final metadata).
+    /// </summary>
+    Task<bool> TryFinishCompleteAsync(
+        Guid id,
+        string finalFileName,
+        string? checksum,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// CAS: Completing → Failed.
+    /// </summary>
+    Task<bool> TryFailCompleteAsync(Guid id, string? checksum, CancellationToken ct = default);
 }

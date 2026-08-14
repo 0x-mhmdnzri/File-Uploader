@@ -6,5 +6,10 @@ public enum UploadStatus
     Completed = 1,
     Expired = 2,
     Aborted = 3,
-    Failed = 4
+    Failed = 4,
+
+    /// <summary>
+    /// Exclusive merge in progress (CAS from Pending). Prevents double-complete across nodes.
+    /// </summary>
+    Completing = 5
 }

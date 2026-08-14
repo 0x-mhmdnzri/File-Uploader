@@ -1,6 +1,5 @@
 namespace WebApi.Domain;
 
-
 public class UploadSession
 {
     public Guid Id { get; set; }
@@ -20,6 +19,11 @@ public class UploadSession
 
     public UploadStatus Status { get; set; } = UploadStatus.Pending;
 
+    /// <summary>
+    /// Optimistic concurrency token. Incremented on every status/metadata write.
+    /// </summary>
+    public int Version { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public DateTime? CompletedAt { get; set; }
@@ -34,17 +38,15 @@ public class UploadSession
     public string? ContentType { get; set; }
 
     /// <summary>
-    /// Client IP that initiated the upload (for rate limiting).
+    /// Client IP that initiated the upload (for rate limiting / quota).
     /// </summary>
     public string? ClientIp { get; set; }
 
     /// <summary>
-    /// Comma-separated list of received chunk indexes (e.g. "0,1,2,5").
-    /// Kept simple for SQLite; can be moved to a child table later if needed.
+    /// Comma-separated list of received chunk indexes (legacy/local hint).
+    /// Multi-node truth for parts is storage listing, not this CSV.
     /// </summary>
     public string ReceivedChunksCsv { get; set; } = string.Empty;
-
-    // ---------- helpers (not mapped) ----------
 
     public HashSet<int> GetReceivedChunks()
     {
@@ -66,5 +68,6 @@ public class UploadSession
         }
     }
 
-    public bool IsExpired() => Status == UploadStatus.Pending && DateTime.UtcNow >= ExpiresAt;
+    public bool IsExpired() =>
+        Status is UploadStatus.Pending or UploadStatus.Completing && DateTime.UtcNow >= ExpiresAt;
 }
