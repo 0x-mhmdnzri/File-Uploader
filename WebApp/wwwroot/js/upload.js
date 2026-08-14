@@ -18,7 +18,7 @@ window.uploaderInit = function (apiBase) {
     const MIN_WORKERS = 2;
     const MAX_WORKERS_CAP = 6;
     const STORAGE_KEY = 'fileUploaderSession';
-    const HASH_SLICE = 4 * 1024 * 1024;
+    const HASH_SLICE = 2 * 1024 * 1024; // 2 MB — constant-memory streaming hash
 
     /** @type {'idle'|'hashing'|'uploading'|'paused'|'verifying'|'done'|'error'} */
     let state = 'idle';
@@ -27,10 +27,11 @@ window.uploaderInit = function (apiBase) {
     let currentUploadId = null;
     let currentChecksum = null;
     let currentFile = null;
-    let currentTotalChunks = 0;
     let uploadedCount = 0;
     let requireChunkCrc32 = false;
+    let requireChunkSha256 = false;
     let adaptiveWorkers = Math.min(Math.max(MIN_WORKERS, Math.floor((navigator.hardwareConcurrency || 4) / 2)), MAX_WORKERS_CAP);
+    let activeWorkers = 0;
     let speedWindowStart = 0;
     let speedWindowBytes = 0;
     let recentMbps = [];
@@ -108,8 +109,7 @@ window.uploaderInit = function (apiBase) {
         return body;
     }
 
-    // CRC32 (IEEE) for optional X-Chunk-CRC32
-    function crc32Hex(arrayBuffer) {
+    function crc32Hex(u8) {
         const table = crc32Hex._t || (crc32Hex._t = (function () {
             const t = new Uint32Array(256);
             for (let i = 0; i < 256; i++) {
@@ -119,37 +119,145 @@ window.uploaderInit = function (apiBase) {
             }
             return t;
         })());
-        const u8 = new Uint8Array(arrayBuffer);
         let crc = 0 ^ (-1);
         for (let i = 0; i < u8.length; i++) crc = (crc >>> 8) ^ table[(crc ^ u8[i]) & 0xFF];
-        crc = (crc ^ (-1)) >>> 0;
-        return crc.toString(16).padStart(8, '0');
+        return ((crc ^ (-1)) >>> 0).toString(16).padStart(8, '0');
+    }
+
+    // ---- Incremental SHA-256 (constant memory; no full-file buffer) ----
+    // FIPS 180-4 style pure JS compressor — processes 64-byte blocks.
+    function createSha256() {
+        const K = new Uint32Array([
+            0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+            0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+            0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+            0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+            0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+            0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+            0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+            0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+        ]);
+        let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+        const w = new Uint32Array(64);
+        const buf = new Uint8Array(64);
+        let bufLen = 0;
+        let totalBitsLo = 0;
+        let totalBitsHi = 0;
+
+        function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+
+        function compress(block) {
+            for (let i = 0; i < 16; i++) {
+                w[i] = (block[i*4] << 24) | (block[i*4+1] << 16) | (block[i*4+2] << 8) | block[i*4+3];
+            }
+            for (let i = 16; i < 64; i++) {
+                const s0 = rotr(w[i-15], 7) ^ rotr(w[i-15], 18) ^ (w[i-15] >>> 3);
+                const s1 = rotr(w[i-2], 17) ^ rotr(w[i-2], 19) ^ (w[i-2] >>> 10);
+                w[i] = (w[i-16] + s0 + w[i-7] + s1) | 0;
+            }
+            let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7;
+            for (let i = 0; i < 64; i++) {
+                const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+                const ch = (e & f) ^ (~e & g);
+                const t1 = (h + S1 + ch + K[i] + w[i]) | 0;
+                const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+                const maj = (a & b) ^ (a & c) ^ (b & c);
+                const t2 = (S0 + maj) | 0;
+                h=g; g=f; f=e; e=(d + t1) | 0; d=c; c=b; b=a; a=(t1 + t2) | 0;
+            }
+            h0=(h0+a)|0; h1=(h1+b)|0; h2=(h2+c)|0; h3=(h3+d)|0;
+            h4=(h4+e)|0; h5=(h5+f)|0; h6=(h6+g)|0; h7=(h7+h)|0;
+        }
+
+        function update(u8) {
+            let off = 0;
+            const len = u8.length;
+            // bit length += len*8
+            const bits = len * 8;
+            totalBitsLo = (totalBitsLo + bits) >>> 0;
+            if (totalBitsLo < bits) totalBitsHi++;
+            totalBitsHi = (totalBitsHi + ((len / 0x20000000) | 0)) >>> 0;
+
+            while (off < len) {
+                const take = Math.min(64 - bufLen, len - off);
+                buf.set(u8.subarray(off, off + take), bufLen);
+                bufLen += take;
+                off += take;
+                if (bufLen === 64) {
+                    compress(buf);
+                    bufLen = 0;
+                }
+            }
+        }
+
+        function hexDigest() {
+            // padding
+            const pad = new Uint8Array(64);
+            pad[0] = 0x80;
+            const lenBits = totalBitsLo;
+            const lenBitsHi = totalBitsHi;
+            // copy remaining
+            const tmp = new Uint8Array(bufLen);
+            tmp.set(buf.subarray(0, bufLen));
+            // re-run update path carefully — finalize without mutating shared state incorrectly
+            let bl = bufLen;
+            const block = new Uint8Array(64);
+            block.set(buf.subarray(0, bl));
+            block[bl++] = 0x80;
+            if (bl > 56) {
+                while (bl < 64) block[bl++] = 0;
+                compress(block);
+                block.fill(0);
+                bl = 0;
+            }
+            while (bl < 56) block[bl++] = 0;
+            // 64-bit length big-endian
+            block[56] = (lenBitsHi >>> 24) & 0xff;
+            block[57] = (lenBitsHi >>> 16) & 0xff;
+            block[58] = (lenBitsHi >>> 8) & 0xff;
+            block[59] = lenBitsHi & 0xff;
+            block[60] = (lenBits >>> 24) & 0xff;
+            block[61] = (lenBits >>> 16) & 0xff;
+            block[62] = (lenBits >>> 8) & 0xff;
+            block[63] = lenBits & 0xff;
+            compress(block);
+
+            function w4(x) {
+                return [x>>>24, (x>>>16)&0xff, (x>>>8)&0xff, x&0xff]
+                    .map(b => b.toString(16).padStart(2, '0')).join('');
+            }
+            return w4(h0)+w4(h1)+w4(h2)+w4(h3)+w4(h4)+w4(h5)+w4(h6)+w4(h7);
+        }
+
+        return { update, hexDigest };
+    }
+
+    async function sha256HexOfBuffer(u8) {
+        const h = createSha256();
+        h.update(u8);
+        return h.hexDigest();
     }
 
     async function apiUploadChunk(uploadId, index, blob) {
         const headers = {};
-        if (requireChunkCrc32) {
+        let body = blob;
+
+        if (requireChunkCrc32 || requireChunkSha256) {
             const buf = await blob.arrayBuffer();
-            headers['X-Chunk-CRC32'] = crc32Hex(buf);
-            const r = await fetch(`${apiBase}/api/uploads/${uploadId}/chunk/${index}`, {
-                method: 'PUT',
-                headers,
-                body: buf
-            });
-            if (!r.ok) {
-                const body = await r.json().catch(() => ({}));
-                throw new Error(body.error || ('chunk ' + index + ' failed: ' + r.status));
-            }
-            return;
+            const u8 = new Uint8Array(buf);
+            if (requireChunkCrc32) headers['X-Chunk-CRC32'] = crc32Hex(u8);
+            if (requireChunkSha256) headers['X-Chunk-SHA256'] = await sha256HexOfBuffer(u8);
+            body = buf;
         }
 
         const r = await fetch(`${apiBase}/api/uploads/${uploadId}/chunk/${index}`, {
             method: 'PUT',
-            body: blob
+            headers,
+            body
         });
         if (!r.ok) {
-            const body = await r.json().catch(() => ({}));
-            throw new Error(body.error || ('chunk ' + index + ' failed: ' + r.status));
+            const resBody = await r.json().catch(() => ({}));
+            throw new Error(resBody.error || ('chunk ' + index + ' failed: ' + r.status));
         }
     }
 
@@ -173,65 +281,27 @@ window.uploaderInit = function (apiBase) {
         return await r.json();
     }
 
-    /** Streaming SHA-256 — does not load whole file into RAM. */
+    /** True streaming SHA-256: O(HASH_SLICE) memory, any file size. */
     async function computeSha256Streaming(file) {
-        const cryptoSubtle = window.crypto?.subtle;
-        if (!cryptoSubtle) return null;
-
         setStatus('Computing checksum (streaming)...');
         setProgress(0, 'Hashing...');
 
-        // Prefer Web Crypto incremental via chunked digest of concatenated slices:
-        // browsers lack public incremental SHA API; we hash by reading slices and
-        // using a pure streaming approach when SubtleCrypto supports it.
-        // Fallback: for files > 512MB skip; else use progressive arrayBuffer slices
-        // merged via a simple multi-part approach is not standard — use slice loop
-        // with sha256-wasm-free approach: read all slices into digest of full file
-        // only if size allows progressive FileReader style.
-
-        if (typeof ReadableStream !== 'undefined' && file.stream) {
-            try {
-                // Use native stream into one digest by buffering only HASH_SLICE at a time
-                // via crypto.subtle.digest on full file is memory heavy; implement
-                // incremental with isomorphic-style: only support streaming when
-                // we can use digest on each chunk and tree-hash — server expects full file SHA.
-                // Practical approach: stream into growing hash using SubtleCrypto is not possible
-                // without WASM. So: for <= 512MB read by slices into one buffer is still heavy.
-                // We read the whole file only if <= 512MB via sequential slice + single digest of concat is worse.
-                // Best portable approach without WASM: arrayBuffer for <= 512MB, else skip.
-            } catch { /* fall through */ }
-        }
-
-        if (file.size > 512 * 1024 * 1024) {
-            console.warn('[UPLOAD] File > 512MB; skipping client-side checksum');
-            return null;
-        }
-
-        // Sequential slice read into one ArrayBuffer still costs RAM; use slice hashing
-        // only for progress UI then full digest via file.arrayBuffer for correctness under 512MB.
+        const hasher = createSha256();
         const total = file.size;
         let offset = 0;
-        const chunks = [];
+
         while (offset < total) {
             if (cancelRequested) return null;
             const end = Math.min(offset + HASH_SLICE, total);
             const buf = await file.slice(offset, end).arrayBuffer();
-            chunks.push(new Uint8Array(buf));
+            hasher.update(new Uint8Array(buf));
             offset = end;
             setProgress(Math.floor((offset / total) * 100), 'Hashing...');
+            // yield to UI
+            await new Promise(r => setTimeout(r, 0));
         }
 
-        const merged = new Uint8Array(total);
-        let pos = 0;
-        for (const c of chunks) {
-            merged.set(c, pos);
-            pos += c.length;
-        }
-
-        const hashBuffer = await cryptoSubtle.digest('SHA-256', merged);
-        return Array.from(new Uint8Array(hashBuffer))
-            .map(b => b.toString(16).padStart(2, '0'))
-            .join('');
+        return hasher.hexDigest();
     }
 
     function noteBytes(n) {
@@ -252,7 +322,6 @@ window.uploaderInit = function (apiBase) {
     function adaptWorkers() {
         if (recentMbps.length < 3) return;
         const avg = recentMbps.reduce((a, b) => a + b, 0) / recentMbps.length;
-        // Raise concurrency when pipe is healthy; drop when throughput collapses.
         if (avg > 20 && adaptiveWorkers < MAX_WORKERS_CAP) adaptiveWorkers++;
         else if (avg < 4 && adaptiveWorkers > MIN_WORKERS) adaptiveWorkers--;
     }
@@ -261,7 +330,6 @@ window.uploaderInit = function (apiBase) {
         currentFile = file;
         currentUploadId = uploadId;
         currentChecksum = checksum;
-        currentTotalChunks = totalChunks;
         cancelRequested = false;
         pauseRequested = false;
 
@@ -282,6 +350,7 @@ window.uploaderInit = function (apiBase) {
         setState('uploading');
         speedWindowStart = performance.now();
         speedWindowBytes = 0;
+        activeWorkers = 0;
 
         saveSession({
             uploadId,
@@ -292,9 +361,29 @@ window.uploaderInit = function (apiBase) {
             savedAt: Date.now()
         });
 
-        async function worker() {
-            while (true) {
-                if (cancelRequested || pauseRequested) return;
+        let fatalError = null;
+
+        function pump() {
+            while (
+                activeWorkers < adaptiveWorkers &&
+                queue.length > 0 &&
+                !cancelRequested &&
+                !pauseRequested &&
+                !fatalError
+            ) {
+                activeWorkers++;
+                workerOne().finally(() => {
+                    activeWorkers--;
+                    if (!fatalError && !cancelRequested && !pauseRequested) pump();
+                });
+            }
+        }
+
+        async function workerOne() {
+            while (!cancelRequested && !pauseRequested && !fatalError) {
+                // Shrink: if over target concurrency, exit this worker.
+                if (activeWorkers > adaptiveWorkers) return;
+
                 const item = queue.shift();
                 if (!item) return;
 
@@ -312,16 +401,24 @@ window.uploaderInit = function (apiBase) {
                         queue.push(item);
                         await new Promise(r => setTimeout(r, 400 * item.retries));
                     } else if (!cancelRequested) {
-                        throw e;
+                        fatalError = e;
+                        return;
                     }
                 }
             }
         }
 
-        // Launch current adaptive worker count; mid-flight changes affect next run only.
-        const n = adaptiveWorkers;
-        const workers = Array.from({ length: n }, () => worker());
-        await Promise.all(workers);
+        pump();
+
+        // Wait until idle: no active workers and (queue empty or stopped).
+        while (activeWorkers > 0 || (queue.length > 0 && !cancelRequested && !pauseRequested && !fatalError)) {
+            if (fatalError) break;
+            // Allow scale-up mid-flight
+            if (!cancelRequested && !pauseRequested && !fatalError) pump();
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        if (fatalError) throw fatalError;
 
         if (cancelRequested) {
             setStatus('Cancelled');
@@ -365,6 +462,7 @@ window.uploaderInit = function (apiBase) {
             setStatus('Initiating...');
             const init = await apiInitiate(file, checksum);
             requireChunkCrc32 = !!init.requireChunkCrc32;
+            requireChunkSha256 = !!init.requireChunkSha256;
             await runUpload(file, init.uploadId, init.totalChunks, checksum, []);
         } catch (err) {
             console.error('[UPLOAD]', err);
