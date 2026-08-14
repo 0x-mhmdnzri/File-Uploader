@@ -6,9 +6,6 @@ public class UploadSession
 
     public string FileName { get; set; } = string.Empty;
 
-    /// <summary>
-    /// Final name on disk (may differ from FileName if conflict resolution is applied).
-    /// </summary>
     public string? FinalFileName { get; set; }
 
     public long TotalSize { get; set; }
@@ -20,7 +17,7 @@ public class UploadSession
     public UploadStatus Status { get; set; } = UploadStatus.Pending;
 
     /// <summary>
-    /// Optimistic concurrency token. Incremented on every status/metadata write.
+    /// Optimistic concurrency token. Incremented on status/metadata writes.
     /// </summary>
     public int Version { get; set; }
 
@@ -28,23 +25,16 @@ public class UploadSession
 
     public DateTime? CompletedAt { get; set; }
 
-    /// <summary>
-    /// After this time, a still-Pending session is considered orphan and will be cleaned up.
-    /// </summary>
     public DateTime ExpiresAt { get; set; }
 
     public string? Checksum { get; set; }
 
     public string? ContentType { get; set; }
 
-    /// <summary>
-    /// Client IP that initiated the upload (for rate limiting / quota).
-    /// </summary>
     public string? ClientIp { get; set; }
 
     /// <summary>
-    /// Comma-separated list of received chunk indexes (legacy/local hint).
-    /// Multi-node truth for parts is storage listing, not this CSV.
+    /// Legacy/local hint. Multi-node part truth is storage listing.
     /// </summary>
     public string ReceivedChunksCsv { get; set; } = string.Empty;
 
@@ -63,11 +53,9 @@ public class UploadSession
     {
         var set = GetReceivedChunks();
         if (set.Add(index))
-        {
             ReceivedChunksCsv = string.Join(',', set.OrderBy(x => x));
-        }
     }
 
     public bool IsExpired() =>
-        Status is UploadStatus.Pending or UploadStatus.Completing && DateTime.UtcNow >= ExpiresAt;
+        (Status is UploadStatus.Pending or UploadStatus.Completing) && DateTime.UtcNow >= ExpiresAt;
 }

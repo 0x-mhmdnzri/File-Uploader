@@ -58,19 +58,29 @@ try
     var connectionString = builder.Configuration.GetConnectionString("Default")
                            ?? "Data Source=uploads.db";
 
+    // D1: Sqlite (single node / lab) or Postgres (shared metadata across API instances).
+    var dbProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
     builder.Services.AddDbContext<AppDbContext>(options =>
-        options.UseSqlite(connectionString));
+    {
+        if (string.Equals(dbProvider, "Postgres", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(dbProvider, "PostgreSQL", StringComparison.OrdinalIgnoreCase))
+        {
+            options.UseNpgsql(connectionString);
+        }
+        else
+        {
+            options.UseSqlite(connectionString);
+        }
+    });
 
     builder.Services.AddScoped<IUploadRepository, EfUploadRepository>();
 
-    // Hasher: Hardware (default) or Cpu
     var hasherMode = builder.Configuration.GetSection(StorageOptions.SectionName)["Hasher"] ?? "Hardware";
     if (string.Equals(hasherMode, "Cpu", StringComparison.OrdinalIgnoreCase))
         builder.Services.AddSingleton<IFileHasher, Sha256FileHasher>();
     else
         builder.Services.AddSingleton<IFileHasher, HardwareSha256FileHasher>();
 
-    // Storage: FileSystem (default) or S3
     var provider = builder.Configuration.GetSection(StorageOptions.SectionName)["Provider"] ?? "FileSystem";
     if (string.Equals(provider, "S3", StringComparison.OrdinalIgnoreCase))
         builder.Services.AddSingleton<IFileStorage, S3FileStorage>();
@@ -97,7 +107,6 @@ try
     builder.Services.AddSingleton<IUploadEventHandler>(sp =>
         sp.GetRequiredService<WebhookUploadEventHandler>());
 
-    // Optional RabbitMQ bridge
     builder.Services.AddSingleton<RabbitMqUploadEventHandler>();
     builder.Services.AddSingleton<IUploadEventHandler>(sp =>
         sp.GetRequiredService<RabbitMqUploadEventHandler>());
@@ -158,8 +167,8 @@ try
     app.MapGet("/api/metrics", (IUploadMetrics metrics) => Results.Ok(metrics.Snapshot()));
 
     Log.Information(
-        "File Uploader API starting Provider={Provider} Hasher={Hasher}",
-        provider, hasherMode);
+        "File Uploader API starting Db={DbProvider} Storage={Provider} Hasher={Hasher}",
+        dbProvider, provider, hasherMode);
     app.Run();
 }
 catch (Exception ex)
