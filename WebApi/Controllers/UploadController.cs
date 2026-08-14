@@ -1,6 +1,9 @@
+using System.IO.Hashing;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using WebApi.Infrastructure;
 using WebApi.Interfaces;
+using WebApi.Storages;
 
 namespace WebApi.Controllers;
 
@@ -10,17 +13,18 @@ public class UploadController : ControllerBase
 {
     private readonly IUploadService _service;
     private readonly IFileStorage _storage;
+    private readonly StorageOptions _options;
 
-    public UploadController(IUploadService service, IFileStorage storage)
+    public UploadController(
+        IUploadService service,
+        IFileStorage storage,
+        IOptions<StorageOptions> options)
     {
         _service = service;
         _storage = storage;
+        _options = options.Value;
     }
 
-    /// <summary>
-    /// Start a new chunked upload session.
-    /// Optional: pass checksum (hex SHA-256) to be verified after merge.
-    /// </summary>
     [HttpPost("initiate")]
     public async Task<IActionResult> Initiate(
         [FromForm] string fileName,
@@ -42,7 +46,8 @@ public class UploadController : ControllerBase
                 uploadId = session.Id,
                 chunkSize = session.ChunkSize,
                 totalChunks = session.TotalChunks,
-                expiresAt = session.ExpiresAt
+                expiresAt = session.ExpiresAt,
+                requireChunkCrc32 = _options.RequireChunkCrc32
             });
         }
         catch (ArgumentException ex)
@@ -56,9 +61,8 @@ public class UploadController : ControllerBase
     }
 
     /// <summary>
-    /// Upload a single chunk.
-    /// Optional Content-Encoding: gzip | deflate | br (per-chunk transport compression).
-    /// Body is decompressed before storage so parts remain raw.
+    /// Upload a single chunk. Optional Content-Encoding: gzip | deflate | br.
+    /// Optional header X-Chunk-CRC32 (hex) for early rejection.
     /// </summary>
     [HttpPut("{uploadId:guid}/chunk/{index:int}")]
     [RequestSizeLimit(100_000_000)]
@@ -69,9 +73,37 @@ public class UploadController : ControllerBase
     {
         try
         {
+            // Validate before any disk write — avoids orphan parts.
+            await _service.EnsureCanAcceptChunkAsync(uploadId, index, ct);
+
             var encoding = Request.Headers.ContentEncoding.ToString();
-            await using var stream = ChunkDecompression.Wrap(Request.Body, encoding);
-            await _storage.SaveChunkAsync(uploadId, index, stream, ct);
+            await using var decoded = ChunkDecompression.Wrap(Request.Body, encoding);
+
+            var expectedCrc = Request.Headers["X-Chunk-CRC32"].ToString();
+            if (_options.RequireChunkCrc32 && string.IsNullOrWhiteSpace(expectedCrc))
+                return BadRequest(new { error = "X-Chunk-CRC32 header is required." });
+
+            if (!string.IsNullOrWhiteSpace(expectedCrc))
+            {
+                var crc = new Crc32();
+                await using var tee = new TeeReadStream(decoded, mem => crc.Append(mem.Span));
+                await _storage.SaveChunkAsync(uploadId, index, tee, ct);
+
+                var actual = Convert.ToHexString(crc.GetCurrentHash()).ToLowerInvariant();
+                if (!ChunkCrc32.EqualsHex(expectedCrc, actual))
+                {
+                    // Best-effort: leave part; client should retry same index.
+                    return BadRequest(new
+                    {
+                        error = $"Chunk CRC32 mismatch. Expected {expectedCrc}, got {actual}."
+                    });
+                }
+            }
+            else
+            {
+                await _storage.SaveChunkAsync(uploadId, index, decoded, ct);
+            }
+
             await _service.MarkChunkReceivedAsync(uploadId, index, ct);
             return Ok();
         }
@@ -85,9 +117,6 @@ public class UploadController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Finalize the upload: merge chunks, optionally verify checksum, mark Completed.
-    /// </summary>
     [HttpPost("{uploadId:guid}/complete")]
     public async Task<IActionResult> Complete(
         [FromRoute] Guid uploadId,
@@ -118,9 +147,6 @@ public class UploadController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Abort an in-progress upload and delete temp data.
-    /// </summary>
     [HttpDelete("{uploadId:guid}")]
     public async Task<IActionResult> Abort(
         [FromRoute] Guid uploadId,
@@ -137,10 +163,6 @@ public class UploadController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Get current status and list of received chunks (for resume).
-    /// Uses filesystem as source of truth so parallel uploads don't under-report.
-    /// </summary>
     [HttpGet("{uploadId:guid}/status")]
     public async Task<IActionResult> Status(
         [FromRoute] Guid uploadId,
@@ -150,7 +172,6 @@ public class UploadController : ControllerBase
         if (session is null)
             return NotFound();
 
-        // Disk is authoritative under concurrent parallel chunk uploads.
         var onDisk = await _storage.GetExistingChunkIndexesAsync(uploadId, ct);
         var received = onDisk.OrderBy(x => x).ToArray();
 

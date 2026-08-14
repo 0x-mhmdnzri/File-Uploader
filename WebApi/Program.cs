@@ -12,7 +12,6 @@ using WebApi.Repositories;
 using WebApi.Services;
 using WebApi.Storages;
 
-// ---------- Serilog bootstrap ----------
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
     .CreateBootstrapLogger();
@@ -33,7 +32,6 @@ try
             retainedFileCountLimit: 14,
             shared: true));
 
-    // ---------- Services ----------
     builder.Services.AddControllers();
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen();
@@ -53,20 +51,25 @@ try
     builder.Services.AddSingleton<IFileHasher, Sha256FileHasher>();
     builder.Services.AddSingleton<IFileStorage, FileSystemStorage>();
     builder.Services.AddSingleton<IReceivedChunkCache, ReceivedChunkCache>();
+    builder.Services.AddSingleton<ISessionCache>(sp =>
+    {
+        var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<StorageOptions>>().Value;
+        var ttl = TimeSpan.FromSeconds(Math.Max(5, opts.SessionCacheTtlSeconds));
+        return new SessionCache(ttl);
+    });
     builder.Services.AddScoped<IUploadService, UploadService>();
     builder.Services.AddSingleton<IUploadMetrics, UploadMetrics>();
 
-    // ---- In-process event bus ----
     builder.Services.AddSingleton<ChannelUploadEventBus>();
     builder.Services.AddSingleton<IUploadEventPublisher, ChannelUploadEventPublisher>();
     builder.Services.AddHostedService<UploadEventDispatcherService>();
 
-    // Handlers (add more without touching UploadService)
     builder.Services.AddSingleton<IUploadEventHandler, LoggingUploadEventHandler>();
     builder.Services.AddHttpClient<WebhookUploadEventHandler>();
     builder.Services.AddSingleton<IUploadEventHandler>(sp =>
         sp.GetRequiredService<WebhookUploadEventHandler>());
 
+    // Single cleanup path
     builder.Services.AddHostedService<OrphanCleanupService>();
 
     builder.Services.AddHealthChecks()

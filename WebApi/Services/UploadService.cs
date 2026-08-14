@@ -13,6 +13,7 @@ public class UploadService : IUploadService
     private readonly IFileStorage _storage;
     private readonly IUploadEventPublisher _events;
     private readonly IReceivedChunkCache _receivedCache;
+    private readonly ISessionCache _sessionCache;
     private readonly StorageOptions _options;
     private readonly IUploadMetrics _metrics;
     private readonly ILogger<UploadService> _logger;
@@ -22,6 +23,7 @@ public class UploadService : IUploadService
         IFileStorage storage,
         IUploadEventPublisher events,
         IReceivedChunkCache receivedCache,
+        ISessionCache sessionCache,
         IOptions<StorageOptions> options,
         IUploadMetrics metrics,
         ILogger<UploadService> logger)
@@ -30,6 +32,7 @@ public class UploadService : IUploadService
         _storage = storage;
         _events = events;
         _receivedCache = receivedCache;
+        _sessionCache = sessionCache;
         _options = options.Value;
         _metrics = metrics;
         _logger = logger;
@@ -86,6 +89,7 @@ public class UploadService : IUploadService
 
         await _repo.AddAsync(session, ct);
         _receivedCache.GetOrCreate(session.Id);
+        _sessionCache.Set(session);
         _metrics.RecordInitiated();
 
         _logger.LogInformation(
@@ -95,10 +99,9 @@ public class UploadService : IUploadService
         return session;
     }
 
-    public async Task MarkChunkReceivedAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default)
+    public async Task EnsureCanAcceptChunkAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default)
     {
-        // Validate session first — no CSV/DB write on the hot path.
-        var session = await _repo.GetAsync(uploadId, ct)
+        var session = await GetSessionHotAsync(uploadId, ct)
                      ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
 
         if (session.Status != UploadStatus.Pending)
@@ -107,7 +110,14 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
-        // Lock-free in-memory mark only. Disk is truth at complete; status reads disk.
+        if (chunkIndex < 0 || chunkIndex >= session.TotalChunks)
+            throw new InvalidOperationException($"Chunk index {chunkIndex} out of range [0, {session.TotalChunks}).");
+    }
+
+    public async Task MarkChunkReceivedAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default)
+    {
+        await EnsureCanAcceptChunkAsync(uploadId, chunkIndex, ct);
+
         var map = _receivedCache.GetOrCreate(uploadId);
         map.TryAdd(chunkIndex, 0);
         _metrics.RecordChunkUploaded();
@@ -144,7 +154,6 @@ public class UploadService : IUploadService
                 $"On-disk size mismatch. Expected {session.TotalSize} bytes, got {bytesOnDisk}.");
         }
 
-        // Persist received set once at complete (not on every chunk).
         if (_receivedCache.TryGet(uploadId, out var map) && !map.IsEmpty)
         {
             session.ReceivedChunksCsv = string.Join(',', map.Keys.OrderBy(x => x));
@@ -173,6 +182,7 @@ public class UploadService : IUploadService
             _logger.LogError(ex, "Merge failed for upload {UploadId}", uploadId);
             session.Status = UploadStatus.Failed;
             await _repo.UpdateAsync(session, ct);
+            _sessionCache.Remove(uploadId);
             _metrics.RecordFailed();
             await SafePublishFailedAsync(session, "merge_failed", ct);
             throw;
@@ -190,6 +200,7 @@ public class UploadService : IUploadService
                 session.Status = UploadStatus.Failed;
                 session.Checksum = actualChecksum;
                 await _repo.UpdateAsync(session, ct);
+                _sessionCache.Remove(uploadId);
                 _metrics.RecordFailed();
                 await SafePublishFailedAsync(session, "checksum_mismatch", ct);
 
@@ -208,6 +219,7 @@ public class UploadService : IUploadService
         _metrics.RecordCompleted(session.TotalSize);
 
         _receivedCache.Remove(uploadId);
+        _sessionCache.Remove(uploadId);
 
         _logger.LogInformation(
             "Upload completed {UploadId} → {FinalFileName}",
@@ -230,6 +242,7 @@ public class UploadService : IUploadService
         await _repo.UpdateAsync(session, ct);
         await _storage.DeleteTempFolderAsync(uploadId, ct);
         _receivedCache.Remove(uploadId);
+        _sessionCache.Remove(uploadId);
         _metrics.RecordAborted();
 
         _logger.LogInformation("Upload aborted {UploadId}", uploadId);
@@ -248,9 +261,24 @@ public class UploadService : IUploadService
         }
     }
 
-    public Task<UploadSession?> GetStatusAsync(Guid uploadId, CancellationToken ct = default)
+    public async Task<UploadSession?> GetStatusAsync(Guid uploadId, CancellationToken ct = default)
     {
-        return _repo.GetAsync(uploadId, ct);
+        var session = await _repo.GetAsync(uploadId, ct);
+        if (session is not null)
+            _sessionCache.Set(session);
+        return session;
+    }
+
+    private async Task<UploadSession?> GetSessionHotAsync(Guid uploadId, CancellationToken ct)
+    {
+        if (_sessionCache.TryGet(uploadId, out var cached))
+            return cached;
+
+        var session = await _repo.GetAsync(uploadId, ct);
+        if (session is not null)
+            _sessionCache.Set(session);
+
+        return session;
     }
 
     private async Task SafePublishCompletedAsync(UploadSession session, CancellationToken ct)
