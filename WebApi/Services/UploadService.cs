@@ -13,31 +13,30 @@ public class UploadService : IUploadService
     private readonly IUploadRepository _repo;
     private readonly IFileStorage _storage;
     private readonly IUploadEventPublisher _events;
+    private readonly IReceivedChunkCache _receivedCache;
     private readonly StorageOptions _options;
     private readonly IUploadMetrics _metrics;
-    private readonly ILogger<UploadService> _logger;
-
-    // In-memory lock-free received tracking (disk remains source of truth on complete).
-    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<int, byte>> _received =
-        new();
+    private readonly ILogger&lt;UploadService&gt; _logger;
 
     public UploadService(
         IUploadRepository repo,
         IFileStorage storage,
         IUploadEventPublisher events,
-        IOptions<StorageOptions> options,
+        IReceivedChunkCache receivedCache,
+        IOptions&lt;StorageOptions&gt; options,
         IUploadMetrics metrics,
-        ILogger<UploadService> logger)
+        ILogger&lt;UploadService&gt; logger)
     {
         _repo = repo;
         _storage = storage;
         _events = events;
+        _receivedCache = receivedCache;
         _options = options.Value;
         _metrics = metrics;
         _logger = logger;
     }
 
-    public async Task<UploadSession> InitiateAsync(
+    public async Task&lt;UploadSession&gt; InitiateAsync(
         string fileName,
         long totalSize,
         int chunkSize,
@@ -49,20 +48,20 @@ public class UploadService : IUploadService
         if (string.IsNullOrWhiteSpace(fileName))
             throw new ArgumentException("fileName is required", nameof(fileName));
 
-        if (totalSize <= 0)
+        if (totalSize &lt;= 0)
             throw new ArgumentException("totalSize must be positive", nameof(totalSize));
 
-        if (chunkSize <= 0)
+        if (chunkSize &lt;= 0)
             throw new ArgumentException("chunkSize must be positive", nameof(chunkSize));
 
         ValidateFileSize(totalSize);
         ValidateChunkSize(chunkSize);
         ValidateExtension(fileName);
 
-        if (!string.IsNullOrWhiteSpace(clientIp) && _options.MaxPendingSessionsPerIp > 0)
+        if (!string.IsNullOrWhiteSpace(clientIp) &amp;&amp; _options.MaxPendingSessionsPerIp &gt; 0)
         {
             var pendingCount = await _repo.CountActivePendingByIpAsync(clientIp, ct);
-            if (pendingCount >= _options.MaxPendingSessionsPerIp)
+            if (pendingCount &gt;= _options.MaxPendingSessionsPerIp)
             {
                 throw new InvalidOperationException(
                     $"Too many pending uploads from this IP. Limit is {_options.MaxPendingSessionsPerIp}.");
@@ -87,7 +86,7 @@ public class UploadService : IUploadService
         };
 
         await _repo.AddAsync(session, ct);
-        _received[session.Id] = new ConcurrentDictionary<int, byte>();
+        _receivedCache.GetOrCreate(session.Id);
         _metrics.RecordInitiated();
 
         _logger.LogInformation(
@@ -108,17 +107,18 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
-        // Lock-free in-memory mark.
-        var map = _received.GetOrAdd(uploadId, static _ => new ConcurrentDictionary<int, byte>());
+        // Lock-free in-memory mark (process-wide ConcurrentDictionary).
+        var map = _receivedCache.GetOrCreate(uploadId);
         map.TryAdd(chunkIndex, 0);
 
-        // Best-effort CSV update for status/resume UI. Disk is authoritative on complete.
+        // Best-effort CSV for status/resume UI. Disk is authoritative on complete.
+        // Under parallel PUTs this can race; that is accepted.
         session.MarkChunkReceived(chunkIndex);
         await _repo.UpdateAsync(session, ct);
         _metrics.RecordChunkUploaded();
     }
 
-    public async Task<string> CompleteAsync(Guid uploadId, string? checksum = null, CancellationToken ct = default)
+    public async Task&lt;string&gt; CompleteAsync(Guid uploadId, string? checksum = null, CancellationToken ct = default)
     {
         var session = await _repo.GetAsync(uploadId, ct)
                      ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
@@ -136,9 +136,9 @@ public class UploadService : IUploadService
         var (missing, bytesOnDisk) = await _storage.VerifyChunksParallelAsync(
             uploadId, session.TotalChunks, ct);
 
-        if (missing.Count > 0)
+        if (missing.Count &gt; 0)
         {
-            var sample = missing.OrderBy(x => x).Take(20).ToArray();
+            var sample = missing.OrderBy(x =&gt; x).Take(20).ToArray();
             throw new InvalidOperationException(
                 $"Not all chunks received. Expected {session.TotalChunks}, missing {missing.Count}. " +
                 $"Missing (sample): [{string.Join(", ", sample)}]");
@@ -150,10 +150,10 @@ public class UploadService : IUploadService
                 $"On-disk size mismatch. Expected {session.TotalSize} bytes, got {bytesOnDisk}.");
         }
 
-        // Keep CSV in sync for status endpoint consumers.
-        if (_received.TryGetValue(uploadId, out var map) && !map.IsEmpty)
+        // Sync CSV from cache when available.
+        if (_receivedCache.TryGet(uploadId, out var map) &amp;&amp; !map.IsEmpty)
         {
-            session.ReceivedChunksCsv = string.Join(',', map.Keys.OrderBy(x => x));
+            session.ReceivedChunksCsv = string.Join(',', map.Keys.OrderBy(x =&gt; x));
         }
         else
         {
@@ -240,7 +240,7 @@ public class UploadService : IUploadService
         await _repo.UpdateAsync(session, ct);
         _metrics.RecordCompleted(session.TotalSize);
 
-        _received.TryRemove(uploadId, out _);
+        _receivedCache.Remove(uploadId);
 
         _logger.LogInformation(
             "Upload completed {UploadId} → {FinalFileName}",
@@ -262,7 +262,7 @@ public class UploadService : IUploadService
         session.Status = UploadStatus.Aborted;
         await _repo.UpdateAsync(session, ct);
         await _storage.DeleteTempFolderAsync(uploadId, ct);
-        _received.TryRemove(uploadId, out _);
+        _receivedCache.Remove(uploadId);
         _metrics.RecordAborted();
 
         _logger.LogInformation("Upload aborted {UploadId}", uploadId);
@@ -281,7 +281,7 @@ public class UploadService : IUploadService
         }
     }
 
-    public Task<UploadSession?> GetStatusAsync(Guid uploadId, CancellationToken ct = default)
+    public Task&lt;UploadSession?&gt; GetStatusAsync(Guid uploadId, CancellationToken ct = default)
     {
         return _repo.GetAsync(uploadId, ct);
     }
@@ -325,7 +325,7 @@ public class UploadService : IUploadService
 
     private void ValidateFileSize(long totalSize)
     {
-        if (_options.MaxFileSizeBytes > 0 && totalSize > _options.MaxFileSizeBytes)
+        if (_options.MaxFileSizeBytes &gt; 0 &amp;&amp; totalSize &gt; _options.MaxFileSizeBytes)
         {
             throw new ArgumentException(
                 $"File size {totalSize} exceeds maximum allowed {_options.MaxFileSizeBytes} bytes.");
@@ -334,7 +334,7 @@ public class UploadService : IUploadService
 
     private void ValidateChunkSize(int chunkSize)
     {
-        if (_options.MaxChunkSizeBytes > 0 && chunkSize > _options.MaxChunkSizeBytes)
+        if (_options.MaxChunkSizeBytes &gt; 0 &amp;&amp; chunkSize &gt; _options.MaxChunkSizeBytes)
         {
             throw new ArgumentException(
                 $"Chunk size {chunkSize} exceeds maximum allowed {_options.MaxChunkSizeBytes} bytes.");
@@ -347,18 +347,18 @@ public class UploadService : IUploadService
 
         if (string.IsNullOrEmpty(ext))
         {
-            if (_options.AllowedExtensions is { Length: > 0 })
+            if (_options.AllowedExtensions is { Length: &gt; 0 })
                 throw new ArgumentException("Files without extension are not allowed.");
             return;
         }
 
         var blocked = _options.BlockedExtensions ?? [];
-        if (blocked.Any(b => string.Equals(b.TrimStart('.'), ext, StringComparison.OrdinalIgnoreCase)))
+        if (blocked.Any(b =&gt; string.Equals(b.TrimStart('.'), ext, StringComparison.OrdinalIgnoreCase)))
             throw new ArgumentException($"File extension '.{ext}' is blocked.");
 
         var allowed = _options.AllowedExtensions ?? [];
-        if (allowed.Length > 0 &&
-            !allowed.Any(a => string.Equals(a.TrimStart('.'), ext, StringComparison.OrdinalIgnoreCase)))
+        if (allowed.Length &gt; 0 &amp;&amp;
+            !allowed.Any(a =&gt; string.Equals(a.TrimStart('.'), ext, StringComparison.OrdinalIgnoreCase)))
             throw new ArgumentException($"File extension '.{ext}' is not in the allowed list.");
     }
 
