@@ -78,9 +78,15 @@ try
         {
             policy
                 .WithOrigins(
+                    "http://localhost:5074",
+                    "https://localhost:5074",
+                    "http://localhost:5073",
+                    "https://localhost:5073",
                     "https://localhost:7097",
                     "http://localhost:5097",
-                    "http://localhost:3000")
+                    "http://localhost:3000",
+                    "http://localhost:5173",
+                    "https://localhost:5173")
                 .AllowAnyHeader()
                 .AllowAnyMethod()
                 .AllowCredentials();
