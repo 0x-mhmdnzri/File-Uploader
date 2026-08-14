@@ -1,156 +1,89 @@
-# 🚀 High-Performance Chunked File Upload (16MB + Parallel Upload)
+ 
+# 🚀 High-Performance Chunked File Upload Service
 
-A fully optimized **high-throughput file upload system** designed for very large files (5GB–20GB).
-This project implements a **chunked + parallel upload architecture** with a highly efficient .NET backend and a browser-optimized JS client.
-
-The latest version uses:
-
-* **16MB chunk size (balanced optimal)**
-* **4–6 parallel workers**
-* **Direct append-merge on disk**
-* **Zero buffering in memory**
-* **Async file streams with 1MB buffer**
-* **Full resume support**
-* **Maximized throughput without CPU/Disk contention**
+A blazing-fast, production-ready file upload service optimized for **very large files (up to 20GB+)**.  
+Built with **clean hexagonal architecture**, **resumable chunked uploads**, **parallel processing**, and **Brotli compression on the client** for maximum speed and bandwidth savings.
 
 ---
 
-## 🔥 Why This Architecture?
+## 🔥 Why This Service?
 
-| Feature         | Before                      | After                                        |
-| --------------- | --------------------------- | -------------------------------------------- |
-| Chunk Size      | 2MB                         | **16MB (x8 larger; fewer roundtrips)**       |
-| Upload Strategy | Single-threaded             | **Parallel (4–6 concurrent workers)**        |
-| Backend Merge   | Read each chunk into memory | **Zero-copy streaming merge**                |
-| Disk IO Pattern | Many small writes           | **Large sequential writes → MAX throughput** |
-| Resume          | Partial                     | **Full resume with real status**             |
-| Throughput      | Slow                        | **~4x–10x faster depending on device**       |
-
----
-
-# 🧩 Architecture Overview
-
-## 1. **Client (JavaScript)**
-
-The upload process is sliced into 16MB chunks and sent with **parallel workers** for maximum throughput while preventing CPU and disk overload.
-
-### Key Decisions
-
-* **16MB chunk size** proved the best balance between speed and overhead.
-* Workers = `min(cpu/2, 6)` ensures:
-
-  * zero CPU exhaustion
-  * zero browser throttling
-  * optimal multi-threaded uploads
-
-### Final Client Configuration
-
-```js
-const CHUNK_SIZE = 16 * 1024 * 1024; // 16MB optimal
-const MAX_WORKERS = Math.min(Math.floor(navigator.hardwareConcurrency / 2), 6);
-```
-
-### Upload Flow
-
-1. Initiate upload → server returns uploadId + totalChunks
-2. Worker pool sends chunks in parallel
-3. Server stores each chunk
-4. User may pause/close browser → resume supported
-5. After all chunks arrive → server merges them into final file
+| Feature                  | Old System     | New System                  |
+|--------------------------|----------------|-----------------------------|
+| Chunk Size               | 2MB            | **16MB (8x larger)**        |
+| Upload Strategy           | Single-thread  | **4–6 parallel workers**    |
+| Backend Merge             | Full buffering | **Zero-copy streaming**     |
+| Compression               | None           | **Brotli level 11 (client)**|
+| Resume Support            | Partial        | **Full with real status**   |
+| Throughput                | Slow           | **4x – 10x faster**         |
 
 ---
 
-## 2. **Backend (.NET 8 / .NET 9)**
+## 🧩 Architecture
 
-### Optimizations
+### 1. Client (Browser – JavaScript)
+- Full resumable uploads with **pause/resume/cancel**
+- Real-time speed indicator (MB/s)
+- Web Crypto SHA-256 checksum validation
+- **Brotli compression (level 11)** – sends 50-70% smaller payloads
+- LocalStorage resume after page refresh
+- Zero memory spikes
 
-✔ **Sequential disk writes** (fastest pattern on all OSes)
-✔ **1MB buffer** for efficient streaming
-✔ **Async I/O only**
-✔ **CPU-free merge phase** (no recompression, no buffering)
-✔ **Chunk resume tracking**
-✔ **Folder auto-cleanup**
-
-### Simplified High-Performance Merge
-
-```csharp
-for (int i = 0; i < totalChunks; i++)
-{
-    var partFile = Path.Combine(folder, $"{uploadId}.part{i}");
-    await using var partStream = new FileStream(partFile, FileMode.Open, FileAccess.Read, FileShare.Read, 1_048_576, true);
-    await partStream.CopyToAsync(finalStream, 1_048_576, ct);
-}
-```
+### 2. Backend (.NET 9)
+- Hexagonal architecture (ports + adapters)
+- **IFileStorage** interface – easy to swap (FileSystem / S3 / Azure / …)
+- **Channel-based event bus** with webhook support
+- Background orphan cleanup + TTL
+- EF Core + SQLite for upload sessions
+- Serilog + health checks + metrics
 
 ---
 
-# ⚡ Performance Results
+## ⚡ Key Features
 
-| File Size | Old System         | New System       |
-| --------- | ------------------ | ---------------- |
-| 1GB       | ~90–120 sec        | **25–40 sec**    |
-| 7GB       | ~20–30 min         | **6–10 min**     |
-| 12GB      | failed or unstable | **Fully stable** |
-
-Performance improvement: **4× to 10× faster**.
-
----
-
-# 🛠 Features
-
-* ✔ Upload files **up to 20GB+**
-* ✔ Full resume support
-* ✔ Parallel uploads
-* ✔ Backpressure to avoid overload
-* ✔ High-speed disk merge
-* ✔ No memory spikes
-* ✔ Clean architecture
-* ✔ Production-ready
+- ✅ Upload files **up to 20GB+**
+- ✅ Full resume support (even after browser close)
+- ✅ Parallel chunk uploads (4–6 concurrent)
+- ✅ Brotli-compressed chunks on client (maximum speed)
+- ✅ SHA-256 checksum validation (client + server)
+- ✅ Auto orphan file cleanup with lifecycle rules
+- ✅ Clean architecture – easy to extend
+- ✅ Production-ready with observability
 
 ---
 
-# 📦 API Endpoints
+## 📦 API Endpoints
 
-### **POST `/api/uploads/initiate`**
-
-Start upload, returns uploadId + chunk count.
-
-### **PUT `/api/uploads/{id}/chunk/{index}`**
-
-Upload a chunk.
-
-### **GET `/api/uploads/{id}/status`**
-
-Returns received chunks.
-
-### **POST `/api/uploads/{id}/complete`**
-
-Triggers final merge.
+- `POST /api/uploads/initiate` — Start upload  
+- `PUT /api/uploads/{id}/chunk/{index}` — Upload compressed chunk  
+- `GET /api/uploads/{id}/status` — Check progress  
+- `POST /api/uploads/{id}/complete` — Merge & finalize  
+- `GET /health` — Server health check  
+- `GET /api/metrics` — Live metrics
 
 ---
 
-# 🧪 Local Test
-
-Drop a file >5GB and run:
+## 🧪 Quick Start
 
 ```bash
+git clone https://github.com/0x-mhmdnzri/File-Uploader.git
+cd File-Uploader
 dotnet run
 ```
 
-Open browser → upload UI → observe real-time progress.
+Open browser → go to `https://localhost:5000`  
+Upload any file >5GB and feel the magic!
 
 ---
 
-# 🔮 Next Steps (Optional Enhancements)
+## 🔮 Next Steps (Optional)
 
-* GPU-accelerated hashing
-* Brotli/Deflate per-chunk compression
-* Multiple‐node distributed upload shard system
-* S3/GCS/Azure Blob backend adapters
+- GPU-accelerated hashing (when CPU becomes bottleneck)
+- Real distributed multi-node support
+- S3 / Azure Blob / MinIO adapters
+- Virus scanning via events
 
 ---
 
-# 👨‍💻 Author
-
-**Mohammad Nazari** — Backend .NET Developer
-High-performance systems, architecture, DDD & scalable infrastructure.
+**Made with ❤️ by Mohammad Nazari**  
+Backend Developer | .NET | Hexagonal Architecture | High-Performance Systems
