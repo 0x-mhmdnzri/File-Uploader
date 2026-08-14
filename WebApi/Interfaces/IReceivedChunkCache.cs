@@ -8,9 +8,9 @@ namespace WebApi.Interfaces;
 /// </summary>
 public interface IReceivedChunkCache
 {
-    ConcurrentDictionary&lt;int, byte&gt; GetOrCreate(Guid uploadId);
+    ConcurrentDictionary<int, byte> GetOrCreate(Guid uploadId);
 
-    bool TryGet(Guid uploadId, out ConcurrentDictionary&lt;int, byte&gt; map);
+    bool TryGet(Guid uploadId, out ConcurrentDictionary<int, byte> map);
 
     void Remove(Guid uploadId);
 }

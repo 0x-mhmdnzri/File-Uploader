@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using WebApi.Domain;
 using WebApi.Domain.Events;
@@ -16,16 +15,16 @@ public class UploadService : IUploadService
     private readonly IReceivedChunkCache _receivedCache;
     private readonly StorageOptions _options;
     private readonly IUploadMetrics _metrics;
-    private readonly ILogger&lt;UploadService&gt; _logger;
+    private readonly ILogger<UploadService> _logger;
 
     public UploadService(
         IUploadRepository repo,
         IFileStorage storage,
         IUploadEventPublisher events,
         IReceivedChunkCache receivedCache,
-        IOptions&lt;StorageOptions&gt; options,
+        IOptions<StorageOptions> options,
         IUploadMetrics metrics,
-        ILogger&lt;UploadService&gt; logger)
+        ILogger<UploadService> logger)
     {
         _repo = repo;
         _storage = storage;
@@ -36,7 +35,7 @@ public class UploadService : IUploadService
         _logger = logger;
     }
 
-    public async Task&lt;UploadSession&gt; InitiateAsync(
+    public async Task<UploadSession> InitiateAsync(
         string fileName,
         long totalSize,
         int chunkSize,
@@ -48,20 +47,20 @@ public class UploadService : IUploadService
         if (string.IsNullOrWhiteSpace(fileName))
             throw new ArgumentException("fileName is required", nameof(fileName));
 
-        if (totalSize &lt;= 0)
+        if (totalSize <= 0)
             throw new ArgumentException("totalSize must be positive", nameof(totalSize));
 
-        if (chunkSize &lt;= 0)
+        if (chunkSize <= 0)
             throw new ArgumentException("chunkSize must be positive", nameof(chunkSize));
 
         ValidateFileSize(totalSize);
         ValidateChunkSize(chunkSize);
         ValidateExtension(fileName);
 
-        if (!string.IsNullOrWhiteSpace(clientIp) &amp;&amp; _options.MaxPendingSessionsPerIp &gt; 0)
+        if (!string.IsNullOrWhiteSpace(clientIp) && _options.MaxPendingSessionsPerIp > 0)
         {
             var pendingCount = await _repo.CountActivePendingByIpAsync(clientIp, ct);
-            if (pendingCount &gt;= _options.MaxPendingSessionsPerIp)
+            if (pendingCount >= _options.MaxPendingSessionsPerIp)
             {
                 throw new InvalidOperationException(
                     $"Too many pending uploads from this IP. Limit is {_options.MaxPendingSessionsPerIp}.");
@@ -112,13 +111,12 @@ public class UploadService : IUploadService
         map.TryAdd(chunkIndex, 0);
 
         // Best-effort CSV for status/resume UI. Disk is authoritative on complete.
-        // Under parallel PUTs this can race; that is accepted.
         session.MarkChunkReceived(chunkIndex);
         await _repo.UpdateAsync(session, ct);
         _metrics.RecordChunkUploaded();
     }
 
-    public async Task&lt;string&gt; CompleteAsync(Guid uploadId, string? checksum = null, CancellationToken ct = default)
+    public async Task<string> CompleteAsync(Guid uploadId, string? checksum = null, CancellationToken ct = default)
     {
         var session = await _repo.GetAsync(uploadId, ct)
                      ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
@@ -136,9 +134,9 @@ public class UploadService : IUploadService
         var (missing, bytesOnDisk) = await _storage.VerifyChunksParallelAsync(
             uploadId, session.TotalChunks, ct);
 
-        if (missing.Count &gt; 0)
+        if (missing.Count > 0)
         {
-            var sample = missing.OrderBy(x =&gt; x).Take(20).ToArray();
+            var sample = missing.OrderBy(x => x).Take(20).ToArray();
             throw new InvalidOperationException(
                 $"Not all chunks received. Expected {session.TotalChunks}, missing {missing.Count}. " +
                 $"Missing (sample): [{string.Join(", ", sample)}]");
@@ -150,10 +148,9 @@ public class UploadService : IUploadService
                 $"On-disk size mismatch. Expected {session.TotalSize} bytes, got {bytesOnDisk}.");
         }
 
-        // Sync CSV from cache when available.
-        if (_receivedCache.TryGet(uploadId, out var map) &amp;&amp; !map.IsEmpty)
+        if (_receivedCache.TryGet(uploadId, out var map) && !map.IsEmpty)
         {
-            session.ReceivedChunksCsv = string.Join(',', map.Keys.OrderBy(x =&gt; x));
+            session.ReceivedChunksCsv = string.Join(',', map.Keys.OrderBy(x => x));
         }
         else
         {
@@ -165,7 +162,6 @@ public class UploadService : IUploadService
         string finalPath;
         try
         {
-            // Pre-allocated final file + parallel offset writes (no global merge lock).
             finalPath = await _storage.MergeAsync(
                 uploadId,
                 session.FileName,
@@ -281,7 +277,7 @@ public class UploadService : IUploadService
         }
     }
 
-    public Task&lt;UploadSession?&gt; GetStatusAsync(Guid uploadId, CancellationToken ct = default)
+    public Task<UploadSession?> GetStatusAsync(Guid uploadId, CancellationToken ct = default)
     {
         return _repo.GetAsync(uploadId, ct);
     }
@@ -325,7 +321,7 @@ public class UploadService : IUploadService
 
     private void ValidateFileSize(long totalSize)
     {
-        if (_options.MaxFileSizeBytes &gt; 0 &amp;&amp; totalSize &gt; _options.MaxFileSizeBytes)
+        if (_options.MaxFileSizeBytes > 0 && totalSize > _options.MaxFileSizeBytes)
         {
             throw new ArgumentException(
                 $"File size {totalSize} exceeds maximum allowed {_options.MaxFileSizeBytes} bytes.");
@@ -334,7 +330,7 @@ public class UploadService : IUploadService
 
     private void ValidateChunkSize(int chunkSize)
     {
-        if (_options.MaxChunkSizeBytes &gt; 0 &amp;&amp; chunkSize &gt; _options.MaxChunkSizeBytes)
+        if (_options.MaxChunkSizeBytes > 0 && chunkSize > _options.MaxChunkSizeBytes)
         {
             throw new ArgumentException(
                 $"Chunk size {chunkSize} exceeds maximum allowed {_options.MaxChunkSizeBytes} bytes.");
@@ -347,18 +343,18 @@ public class UploadService : IUploadService
 
         if (string.IsNullOrEmpty(ext))
         {
-            if (_options.AllowedExtensions is { Length: &gt; 0 })
+            if (_options.AllowedExtensions is { Length: > 0 })
                 throw new ArgumentException("Files without extension are not allowed.");
             return;
         }
 
         var blocked = _options.BlockedExtensions ?? [];
-        if (blocked.Any(b =&gt; string.Equals(b.TrimStart('.'), ext, StringComparison.OrdinalIgnoreCase)))
+        if (blocked.Any(b => string.Equals(b.TrimStart('.'), ext, StringComparison.OrdinalIgnoreCase)))
             throw new ArgumentException($"File extension '.{ext}' is blocked.");
 
         var allowed = _options.AllowedExtensions ?? [];
-        if (allowed.Length &gt; 0 &amp;&amp;
-            !allowed.Any(a =&gt; string.Equals(a.TrimStart('.'), ext, StringComparison.OrdinalIgnoreCase)))
+        if (allowed.Length > 0 &&
+            !allowed.Any(a => string.Equals(a.TrimStart('.'), ext, StringComparison.OrdinalIgnoreCase)))
             throw new ArgumentException($"File extension '.{ext}' is not in the allowed list.");
     }
 

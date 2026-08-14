@@ -21,7 +21,7 @@ try
 {
     var builder = WebApplication.CreateBuilder(args);
 
-    builder.Host.UseSerilog((context, services, configuration) =&gt; configuration
+    builder.Host.UseSerilog((context, services, configuration) => configuration
         .ReadFrom.Configuration(context.Configuration)
         .ReadFrom.Services(services)
         .Enrich.FromLogContext()
@@ -38,44 +38,44 @@ try
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen();
 
-    builder.Services.Configure&lt;StorageOptions&gt;(
+    builder.Services.Configure<StorageOptions>(
         builder.Configuration.GetSection(StorageOptions.SectionName));
-    builder.Services.Configure&lt;WebhookOptions&gt;(
+    builder.Services.Configure<WebhookOptions>(
         builder.Configuration.GetSection(WebhookOptions.SectionName));
 
     var connectionString = builder.Configuration.GetConnectionString("Default")
                            ?? "Data Source=uploads.db";
 
-    builder.Services.AddDbContext&lt;AppDbContext&gt;(options =&gt;
+    builder.Services.AddDbContext<AppDbContext>(options =>
         options.UseSqlite(connectionString));
 
-    builder.Services.AddScoped&lt;IUploadRepository, EfUploadRepository&gt;();
-    builder.Services.AddSingleton&lt;IFileHasher, Sha256FileHasher&gt;();
-    builder.Services.AddSingleton&lt;IFileStorage, FileSystemStorage&gt;();
-    builder.Services.AddSingleton&lt;IReceivedChunkCache, ReceivedChunkCache&gt;();
-    builder.Services.AddScoped&lt;IUploadService, UploadService&gt;();
-    builder.Services.AddSingleton&lt;IUploadMetrics, UploadMetrics&gt;();
+    builder.Services.AddScoped<IUploadRepository, EfUploadRepository>();
+    builder.Services.AddSingleton<IFileHasher, Sha256FileHasher>();
+    builder.Services.AddSingleton<IFileStorage, FileSystemStorage>();
+    builder.Services.AddSingleton<IReceivedChunkCache, ReceivedChunkCache>();
+    builder.Services.AddScoped<IUploadService, UploadService>();
+    builder.Services.AddSingleton<IUploadMetrics, UploadMetrics>();
 
     // ---- In-process event bus ----
-    builder.Services.AddSingleton&lt;ChannelUploadEventBus&gt;();
-    builder.Services.AddSingleton&lt;IUploadEventPublisher, ChannelUploadEventPublisher&gt;();
-    builder.Services.AddHostedService&lt;UploadEventDispatcherService&gt;();
+    builder.Services.AddSingleton<ChannelUploadEventBus>();
+    builder.Services.AddSingleton<IUploadEventPublisher, ChannelUploadEventPublisher>();
+    builder.Services.AddHostedService<UploadEventDispatcherService>();
 
     // Handlers (add more without touching UploadService)
-    builder.Services.AddSingleton&lt;IUploadEventHandler, LoggingUploadEventHandler&gt;();
-    builder.Services.AddHttpClient&lt;WebhookUploadEventHandler&gt;();
-    builder.Services.AddSingleton&lt;IUploadEventHandler&gt;(sp =&gt;
-        sp.GetRequiredService&lt;WebhookUploadEventHandler&gt;());
+    builder.Services.AddSingleton<IUploadEventHandler, LoggingUploadEventHandler>();
+    builder.Services.AddHttpClient<WebhookUploadEventHandler>();
+    builder.Services.AddSingleton<IUploadEventHandler>(sp =>
+        sp.GetRequiredService<WebhookUploadEventHandler>());
 
-    builder.Services.AddHostedService&lt;OrphanCleanupService&gt;();
+    builder.Services.AddHostedService<OrphanCleanupService>();
 
     builder.Services.AddHealthChecks()
-        .AddDbContextCheck&lt;AppDbContext&gt;("database")
-        .AddCheck&lt;StorageHealthCheck&gt;("storage");
+        .AddDbContextCheck<AppDbContext>("database")
+        .AddCheck<StorageHealthCheck>("storage");
 
-    builder.Services.AddCors(options =&gt;
+    builder.Services.AddCors(options =>
     {
-        options.AddPolicy("AllowFrontend", policy =&gt;
+        options.AddPolicy("AllowFrontend", policy =>
         {
             policy
                 .WithOrigins(
@@ -98,11 +98,11 @@ try
 
     using (var scope = app.Services.CreateScope())
     {
-        var db = scope.ServiceProvider.GetRequiredService&lt;AppDbContext&gt;();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         await db.Database.EnsureCreatedAsync();
     }
 
-    app.UseSerilogRequestLogging(opts =&gt;
+    app.UseSerilogRequestLogging(opts =>
     {
         opts.MessageTemplate =
             "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms";
@@ -119,7 +119,7 @@ try
     app.MapControllers();
 
     app.MapHealthChecks("/health");
-    app.MapGet("/api/metrics", (IUploadMetrics metrics) =&gt; Results.Ok(metrics.Snapshot()));
+    app.MapGet("/api/metrics", (IUploadMetrics metrics) => Results.Ok(metrics.Snapshot()));
 
     Log.Information("File Uploader API starting");
     app.Run();

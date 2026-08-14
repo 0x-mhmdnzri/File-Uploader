@@ -9,14 +9,14 @@ namespace WebApi.Services;
 /// </summary>
 public sealed class ReceivedChunkCache : IReceivedChunkCache
 {
-    private readonly ConcurrentDictionary&lt;Guid, ConcurrentDictionary&lt;int, byte&gt;&gt; _maps = new();
+    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<int, byte>> _maps = new();
 
-    public ConcurrentDictionary&lt;int, byte&gt; GetOrCreate(Guid uploadId) =&gt;
-        _maps.GetOrAdd(uploadId, static _ =&gt; new ConcurrentDictionary&lt;int, byte&gt;());
+    public ConcurrentDictionary<int, byte> GetOrCreate(Guid uploadId) =>
+        _maps.GetOrAdd(uploadId, static _ => new ConcurrentDictionary<int, byte>());
 
-    public bool TryGet(Guid uploadId, out ConcurrentDictionary&lt;int, byte&gt; map) =&gt;
+    public bool TryGet(Guid uploadId, out ConcurrentDictionary<int, byte> map) =>
         _maps.TryGetValue(uploadId, out map!);
 
-    public void Remove(Guid uploadId) =&gt;
+    public void Remove(Guid uploadId) =>
         _maps.TryRemove(uploadId, out _);
 }
