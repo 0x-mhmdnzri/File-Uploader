@@ -1,6 +1,6 @@
 namespace WebApi.Events;
 
-internal enum UploadEventKind
+public enum UploadEventKind
 {
     Completed,
     Aborted,
@@ -10,7 +10,7 @@ internal enum UploadEventKind
 /// <summary>
 /// Discriminated envelope for the in-process channel bus.
 /// </summary>
-internal sealed class UploadEventEnvelope
+public sealed class UploadEventEnvelope
 {
     public UploadEventKind Kind { get; init; }
     public object Payload { get; init; } = null!;

@@ -5,7 +5,7 @@ namespace WebApi.Events;
 /// <summary>
 /// Bounded in-process bus. Publish is non-blocking (waits if full).
 /// </summary>
-internal sealed class ChannelUploadEventBus
+public sealed class ChannelUploadEventBus
 {
     private readonly Channel<UploadEventEnvelope> _channel;
 
