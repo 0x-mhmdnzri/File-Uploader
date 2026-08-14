@@ -97,18 +97,7 @@ public class UploadService : IUploadService
 
     public async Task MarkChunkReceivedAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default)
     {
-        // Fast path: lock-free in-memory mark only.
-        // Disk is source of truth at complete; status endpoint enumerates disk.
-        // Avoids SQLite write on every parallel PUT.
-        var map = _receivedCache.GetOrCreate(uploadId);
-        if (!map.TryAdd(chunkIndex, 0))
-        {
-            // duplicate chunk — still ok
-            _metrics.RecordChunkUploaded();
-            return;
-        }
-
-        // Light session check without rewriting CSV every time.
+        // Validate session first — no CSV/DB write on the hot path.
         var session = await _repo.GetAsync(uploadId, ct)
                      ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
 
@@ -118,6 +107,9 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
+        // Lock-free in-memory mark only. Disk is truth at complete; status reads disk.
+        var map = _receivedCache.GetOrCreate(uploadId);
+        map.TryAdd(chunkIndex, 0);
         _metrics.RecordChunkUploaded();
     }
 
@@ -168,7 +160,6 @@ public class UploadService : IUploadService
         string actualChecksum;
         try
         {
-            // Parallel offset merge + integrated sequential SHA-256 (one service-level call).
             (finalPath, actualChecksum) = await _storage.MergeAsync(
                 uploadId,
                 session.FileName,
