@@ -8,6 +8,7 @@ using WebApi.Events;
 using WebApi.Events.Handlers;
 using WebApi.Hashing;
 using WebApi.Health;
+using WebApi.Infrastructure;
 using WebApi.Interfaces;
 using WebApi.Metrics;
 using WebApi.Repositories;
@@ -54,11 +55,12 @@ try
         builder.Configuration.GetSection(AuthOptions.SectionName));
     builder.Services.Configure<RabbitMqOptions>(
         builder.Configuration.GetSection(RabbitMqOptions.SectionName));
+    builder.Services.Configure<MultiInstanceOptions>(
+        builder.Configuration.GetSection(MultiInstanceOptions.SectionName));
 
     var connectionString = builder.Configuration.GetConnectionString("Default")
                            ?? "Data Source=uploads.db";
 
-    // D1: Sqlite (single node / lab) or Postgres (shared metadata across API instances).
     var dbProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
     builder.Services.AddDbContext<AppDbContext>(options =>
     {
@@ -139,6 +141,14 @@ try
     });
 
     var app = builder.Build();
+
+    // P4.0 — fail fast on forbidden multi-instance shortcuts
+    {
+        var mi = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MultiInstanceOptions>>().Value;
+        var storage = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<StorageOptions>>().Value;
+        var guardLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("MultiInstance");
+        MultiInstanceStartupGuard.ValidateOrThrow(mi, storage, dbProvider, guardLogger);
+    }
 
     using (var scope = app.Services.CreateScope())
     {
