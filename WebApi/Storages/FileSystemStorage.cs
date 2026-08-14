@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using System.Threading;
 using Microsoft.Extensions.Options;
 using WebApi.Interfaces;
@@ -11,7 +12,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
     private readonly StorageOptions _options;
     private readonly IFileHasher _hasher;
     private readonly SemaphoreSlim _diskGate;
-    private const int BufferSize = 1 * 1024 * 1024; // 1 MB copy buffer
+    private const int BufferSize = 1 * 1024 * 1024;
 
     public FileSystemStorage(IOptions<StorageOptions> options, IFileHasher hasher)
     {
@@ -74,7 +75,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         }
     }
 
-    public async Task<(string Path, string Sha256Hex)> MergeAsync(
+    public Task<(string Path, string Sha256Hex)> MergeAsync(
         Guid uploadId,
         string fileName,
         int totalChunks,
@@ -82,20 +83,98 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         int chunkSize,
         CancellationToken ct = default)
     {
+        return _options.SinglePassMergeAndHash
+            ? MergeSinglePassAsync(uploadId, fileName, totalChunks, totalSize, ct)
+            : MergeParallelThenHashAsync(uploadId, fileName, totalChunks, totalSize, chunkSize, ct);
+    }
+
+    /// <summary>
+    /// Ordered copy of parts into final file while updating SHA-256 — one pass over part bytes.
+    /// </summary>
+    private async Task<(string Path, string Sha256Hex)> MergeSinglePassAsync(
+        Guid uploadId,
+        string fileName,
+        int totalChunks,
+        long totalSize,
+        CancellationToken ct)
+    {
         var folder = Path.Combine(_options.TempPath, uploadId.ToString());
         Directory.CreateDirectory(_options.FinalPath);
 
-        var safeName = Path.GetFileName(fileName);
-        var finalPath = Path.Combine(_options.FinalPath, safeName);
+        var finalPath = ResolveFinalPath(uploadId, fileName);
 
-        if (File.Exists(finalPath))
+        await _diskGate.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            var nameWithoutExt = Path.GetFileNameWithoutExtension(safeName);
-            var ext = Path.GetExtension(safeName);
-            finalPath = Path.Combine(_options.FinalPath, $"{nameWithoutExt}_{uploadId:N}{ext}");
-        }
+            var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+            try
+            {
+                await using var finalFs = new FileStream(
+                    finalPath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: BufferSize,
+                    options: FileOptions.Asynchronous | FileOptions.SequentialScan);
 
-        // Pre-allocate exact size so each worker can seek + write independently.
+                finalFs.SetLength(totalSize);
+
+                using var sha = SHA256.Create();
+
+                for (var i = 0; i < totalChunks; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var partPath = Path.Combine(folder, $"{uploadId}.part{i}");
+                    if (!File.Exists(partPath))
+                        throw new InvalidOperationException($"Missing chunk {i} for upload {uploadId}");
+
+                    await using var partFs = new FileStream(
+                        partPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.Read,
+                        bufferSize: BufferSize,
+                        options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+                    int read;
+                    while ((read = await partFs.ReadAsync(buffer.AsMemory(0, BufferSize), ct).ConfigureAwait(false)) > 0)
+                    {
+                        await finalFs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                        sha.TransformBlock(buffer, 0, read, null, 0);
+                    }
+                }
+
+                await finalFs.FlushAsync(ct).ConfigureAwait(false);
+                sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                var hex = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
+
+                await DeleteTempFolderAsync(uploadId, ct).ConfigureAwait(false);
+                return (finalPath, hex);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        finally
+        {
+            _diskGate.Release();
+        }
+    }
+
+    private async Task<(string Path, string Sha256Hex)> MergeParallelThenHashAsync(
+        Guid uploadId,
+        string fileName,
+        int totalChunks,
+        long totalSize,
+        int chunkSize,
+        CancellationToken ct)
+    {
+        var folder = Path.Combine(_options.TempPath, uploadId.ToString());
+        Directory.CreateDirectory(_options.FinalPath);
+
+        var finalPath = ResolveFinalPath(uploadId, fileName);
+
         await using (var pre = new FileStream(
                          finalPath,
                          FileMode.Create,
@@ -169,12 +248,24 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                 }
             }).ConfigureAwait(false);
 
-        // Integrated sequential hash — service layer does not open the file again.
         var sha256Hex = await _hasher.ComputeSha256Async(finalPath, ct).ConfigureAwait(false);
-
         await DeleteTempFolderAsync(uploadId, ct).ConfigureAwait(false);
-
         return (finalPath, sha256Hex);
+    }
+
+    private string ResolveFinalPath(Guid uploadId, string fileName)
+    {
+        var safeName = Path.GetFileName(fileName);
+        var finalPath = Path.Combine(_options.FinalPath, safeName);
+
+        if (File.Exists(finalPath))
+        {
+            var nameWithoutExt = Path.GetFileNameWithoutExtension(safeName);
+            var ext = Path.GetExtension(safeName);
+            finalPath = Path.Combine(_options.FinalPath, $"{nameWithoutExt}_{uploadId:N}{ext}");
+        }
+
+        return finalPath;
     }
 
     public Task<string> ComputeSha256Async(string filePath, CancellationToken ct = default)
@@ -250,14 +341,9 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
             {
                 var partPath = Path.Combine(folder, $"{uploadId}.part{i}");
                 if (!File.Exists(partPath))
-                {
                     missing.Add(i);
-                }
                 else
-                {
-                    var len = new FileInfo(partPath).Length;
-                    Interlocked.Add(ref bytesOnDisk, len);
-                }
+                    Interlocked.Add(ref bytesOnDisk, new FileInfo(partPath).Length);
 
                 return ValueTask.CompletedTask;
             }).ConfigureAwait(false);
