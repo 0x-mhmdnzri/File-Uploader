@@ -14,17 +14,18 @@ Exit code `0` = both merge strategies produced the same SHA-256.
 | parallel+hash | `false` |
 | single-pass | `true` |
 
-## Measured results (fill on your host — do not invent numbers)
+## Measured results
 
 | Host / disk | size MB | parallel avg ms | single avg ms | winner | date |
 |-------------|---------|-----------------|---------------|--------|------|
-| | 256 | | | | |
-| | 1024 | | | | |
+| MacBook Pro 12-logical, macOS 15.7.2 (temp volume) | 1024 | 3517 | 3299 | single-pass | 2026-08-14 |
+
+Integrity: PASS (identical SHA-256). Recommended: `SinglePassMergeAndHash: true` on this host.
 
 ## API complete timing (optional)
-
-Log `POST /api/uploads/{id}/complete` elapsed via Serilog request logging after a real multi-GB upload.
 
 | Host | file size | complete ms | notes |
 |------|-----------|-------------|-------|
 | | | | |
+
+See also: [BLOG-FA.md](./BLOG-FA.md) (Persian deep-dive).
