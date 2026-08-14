@@ -115,4 +115,29 @@ public class FileSystemStorage : IFileStorage
     public Task<bool> ChunkExistsAsync(Guid uploadId, int chunkIndex) =>
         Task.FromResult(File.Exists(
             Path.Combine(_options.TempPath, uploadId.ToString(), $"{uploadId}.part{chunkIndex}")));
+
+    public Task<IReadOnlyCollection<int>> GetExistingChunkIndexesAsync(Guid uploadId, CancellationToken ct = default)
+    {
+        var folder = Path.Combine(_options.TempPath, uploadId.ToString());
+        if (!Directory.Exists(folder))
+            return Task.FromResult<IReadOnlyCollection<int>>(Array.Empty<int>());
+
+        var prefix = $"{uploadId}.part";
+        var indexes = new List<int>();
+
+        foreach (var file in Directory.EnumerateFiles(folder, $"{prefix}*") )
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var name = Path.GetFileName(file);
+            if (name is null || !name.StartsWith(prefix, StringComparison.Ordinal))
+                continue;
+
+            var indexPart = name[prefix.Length..];
+            if (int.TryParse(indexPart, out var index) && index >= 0)
+                indexes.Add(index);
+        }
+
+        return Task.FromResult<IReadOnlyCollection<int>>(indexes);
+    }
 }
