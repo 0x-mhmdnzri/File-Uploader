@@ -7,10 +7,11 @@ public interface IFileStorage
     Task SaveChunkAsync(Guid uploadId, int chunkIndex, Stream data, CancellationToken ct = default);
 
     /// <summary>
-    /// Pre-allocates the final file and writes each part at its byte offset in parallel.
-    /// Returns the final file path.
+    /// Pre-allocates the final file, writes each part at its byte offset in parallel,
+    /// then streams SHA-256 over the final file once (no second open from the service layer).
+    /// Returns (final path, lowercase hex SHA-256).
     /// </summary>
-    Task<string> MergeAsync(
+    Task<(string Path, string Sha256Hex)> MergeAsync(
         Guid uploadId,
         string fileName,
         int totalChunks,

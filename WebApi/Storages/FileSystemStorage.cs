@@ -11,7 +11,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
     private readonly StorageOptions _options;
     private readonly IFileHasher _hasher;
     private readonly SemaphoreSlim _diskGate;
-    private const int BufferSize = 1 * 1024 * 1024; // 1 MB
+    private const int BufferSize = 1 * 1024 * 1024; // 1 MB copy buffer
 
     public FileSystemStorage(IOptions<StorageOptions> options, IFileHasher hasher)
     {
@@ -44,7 +44,6 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
 
             var filePath = Path.Combine(folder, $"{uploadId}.part{chunkIndex}");
 
-            // Rent a buffer from ArrayPool to avoid LOH / GC pressure on large copies.
             var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
             try
             {
@@ -54,7 +53,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                     FileAccess.Write,
                     FileShare.None,
                     bufferSize: BufferSize,
-                    useAsync: true);
+                    options: FileOptions.Asynchronous | FileOptions.SequentialScan);
 
                 int read;
                 while ((read = await data.ReadAsync(buffer.AsMemory(0, BufferSize), ct).ConfigureAwait(false)) > 0)
@@ -75,7 +74,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         }
     }
 
-    public async Task<string> MergeAsync(
+    public async Task<(string Path, string Sha256Hex)> MergeAsync(
         Guid uploadId,
         string fileName,
         int totalChunks,
@@ -103,7 +102,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                          FileAccess.Write,
                          FileShare.None,
                          bufferSize: 4096,
-                         useAsync: true))
+                         options: FileOptions.Asynchronous))
         {
             pre.SetLength(totalSize);
             await pre.FlushAsync(ct).ConfigureAwait(false);
@@ -139,16 +138,15 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                             FileAccess.Read,
                             FileShare.Read,
                             bufferSize: BufferSize,
-                            useAsync: true);
+                            options: FileOptions.Asynchronous | FileOptions.SequentialScan);
 
-                        // Concurrent writers on the same pre-sized file at non-overlapping offsets.
                         await using var finalFs = new FileStream(
                             finalPath,
                             FileMode.Open,
                             FileAccess.Write,
                             FileShare.ReadWrite,
                             bufferSize: BufferSize,
-                            useAsync: true);
+                            options: FileOptions.Asynchronous | FileOptions.RandomAccess);
 
                         finalFs.Seek(offset, SeekOrigin.Begin);
 
@@ -171,9 +169,12 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                 }
             }).ConfigureAwait(false);
 
+        // Integrated sequential hash — service layer does not open the file again.
+        var sha256Hex = await _hasher.ComputeSha256Async(finalPath, ct).ConfigureAwait(false);
+
         await DeleteTempFolderAsync(uploadId, ct).ConfigureAwait(false);
 
-        return finalPath;
+        return (finalPath, sha256Hex);
     }
 
     public Task<string> ComputeSha256Async(string filePath, CancellationToken ct = default)

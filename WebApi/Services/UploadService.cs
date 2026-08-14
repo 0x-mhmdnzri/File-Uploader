@@ -97,6 +97,18 @@ public class UploadService : IUploadService
 
     public async Task MarkChunkReceivedAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default)
     {
+        // Fast path: lock-free in-memory mark only.
+        // Disk is source of truth at complete; status endpoint enumerates disk.
+        // Avoids SQLite write on every parallel PUT.
+        var map = _receivedCache.GetOrCreate(uploadId);
+        if (!map.TryAdd(chunkIndex, 0))
+        {
+            // duplicate chunk — still ok
+            _metrics.RecordChunkUploaded();
+            return;
+        }
+
+        // Light session check without rewriting CSV every time.
         var session = await _repo.GetAsync(uploadId, ct)
                      ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
 
@@ -106,13 +118,6 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
-        // Lock-free in-memory mark (process-wide ConcurrentDictionary).
-        var map = _receivedCache.GetOrCreate(uploadId);
-        map.TryAdd(chunkIndex, 0);
-
-        // Best-effort CSV for status/resume UI. Disk is authoritative on complete.
-        session.MarkChunkReceived(chunkIndex);
-        await _repo.UpdateAsync(session, ct);
         _metrics.RecordChunkUploaded();
     }
 
@@ -130,7 +135,6 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
-        // Parallel verification: ConcurrentBag for missing + Interlocked size accumulation.
         var (missing, bytesOnDisk) = await _storage.VerifyChunksParallelAsync(
             uploadId, session.TotalChunks, ct);
 
@@ -148,6 +152,7 @@ public class UploadService : IUploadService
                 $"On-disk size mismatch. Expected {session.TotalSize} bytes, got {bytesOnDisk}.");
         }
 
+        // Persist received set once at complete (not on every chunk).
         if (_receivedCache.TryGet(uploadId, out var map) && !map.IsEmpty)
         {
             session.ReceivedChunksCsv = string.Join(',', map.Keys.OrderBy(x => x));
@@ -160,9 +165,11 @@ public class UploadService : IUploadService
         var expectedChecksum = NormalizeChecksum(checksum) ?? session.Checksum;
 
         string finalPath;
+        string actualChecksum;
         try
         {
-            finalPath = await _storage.MergeAsync(
+            // Parallel offset merge + integrated sequential SHA-256 (one service-level call).
+            (finalPath, actualChecksum) = await _storage.MergeAsync(
                 uploadId,
                 session.FileName,
                 session.TotalChunks,
@@ -182,22 +189,6 @@ public class UploadService : IUploadService
 
         if (expectedChecksum is not null)
         {
-            string actualChecksum;
-            try
-            {
-                actualChecksum = await _storage.ComputeSha256Async(finalPath, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Checksum computation failed for upload {UploadId}", uploadId);
-                await _storage.DeleteFinalFileAsync(Path.GetFileName(finalPath), ct);
-                session.Status = UploadStatus.Failed;
-                await _repo.UpdateAsync(session, ct);
-                _metrics.RecordFailed();
-                await SafePublishFailedAsync(session, "checksum_compute_failed", ct);
-                throw;
-            }
-
             if (!string.Equals(actualChecksum, expectedChecksum, StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogWarning(
@@ -215,21 +206,10 @@ public class UploadService : IUploadService
                     $"Checksum mismatch. Expected {expectedChecksum}, got {actualChecksum}");
             }
 
-            session.Checksum = actualChecksum;
             _logger.LogInformation("Checksum verified for upload {UploadId}", uploadId);
         }
-        else
-        {
-            try
-            {
-                session.Checksum = await _storage.ComputeSha256Async(finalPath, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Optional checksum computation failed for {UploadId}", uploadId);
-            }
-        }
 
+        session.Checksum = actualChecksum;
         session.Status = UploadStatus.Completed;
         session.CompletedAt = DateTime.UtcNow;
         session.FinalFileName = Path.GetFileName(finalPath);
