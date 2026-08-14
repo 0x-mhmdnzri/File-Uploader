@@ -1,31 +1,54 @@
-# 📋 BACKLOG — File Uploader (Custom Storage Service)
+# 📋 BACKLOG — File Uploader Adapter
 
-> اولویت‌ها از بالا به پایین مرتب شده‌اند.
+> این پروژه یک **آداپتر آپلود فایل** در معماری هگزاگونال است.
+> فقط مسئولیت **دریافت، ذخیره، resume و تکمیل فایل** را دارد — نه Identity، نه Gateway، نه بقیه سرویس‌ها.
 
 ---
 
-## ✅ وضعیت فعلی
+## 🧭 محدوده مسئولیت (Bounded Context)
+
+### ✅ داخل این آداپتر
+
+| حوزه | توضیح |
+|------|--------|
+| Chunked / resumable upload | initiate, chunk, status, complete, abort |
+| Storage | FileSystem (قابل تعویض با `IFileStorage`) |
+| Session lifecycle | Pending → Completed / Expired / Aborted / Failed |
+| Orphan cleanup | TTL + BackgroundService |
+| Integrity | SHA-256 اختیاری |
+| محدودیت‌های پایه | حجم فایل، chunk، extension، pending per IP |
+| Health / metrics سبک | برای مانیتورینگ خود آداپتر |
+
+### ❌ خارج از این آداپتر (مالکیت سرویس/لایه دیگر)
+
+| موضوع | کجا باید باشد |
+|--------|----------------|
+| Authentication / JWT / User identity | Identity service یا API Gateway |
+| Authorization سطح دامنه (چه کسی به چه فایلی دسترسی دارد) | سرویس دامنه / Policy |
+| Rate limiting سراسری / WAF | API Gateway |
+| Virus scanning | آداپتر/سرویس جدا (رویداد بعد از complete) |
+| CDN / serving فایل نهایی | سرویس دانلود یا object edge |
+| Distributed multi-node coordination | فقط اگر واقعاً چند نود آپلود داشته باشیم |
+
+**نتیجه:** Auth را در این ریپو پیاده نمی‌کنیم مگر به‌صورت اختیاری و نازک (مثلاً API Key از Gateway) — و آن هم فقط اگر صریحاً لازم شود.
+
+---
+
+## ✅ وضعیت فعلی (داخل محدوده)
 
 - [x] Chunked Upload + Parallel Workers
-- [x] Resume (status + localStorage + UI)
+- [x] Resume (status + localStorage + UI دمو)
 - [x] FileSystem storage + sequential merge
-- [x] معماری تمیز + EF Core / SQLite
+- [x] لایه پورت/آداپتر تمیز (`IFileStorage`, `IUploadRepository`, `IUploadService`)
+- [x] EF Core + SQLite برای session
 - [x] Pending → Completed / Expired / Aborted / Failed
 - [x] Orphan Cleanup BackgroundService
-- [x] Abort / Cancel (API + UI)
+- [x] Abort / Cancel
 - [x] مدیریت نام فایل تکراری
 - [x] Checksum SHA-256
-- [x] محدودیت‌های امنیتی پایه
-- [x] Pause / Resume / سرعت / بنر Resume
-- [x] **Serilog (Console + File)**
-- [x] **Health Check (`/health`)**
-- [x] **متریک‌های پایه (`/api/metrics`)**
-
-### باقی‌مانده
-
-| موضوع | توضیح |
-|------|--------|
-| Auth | JWT / API Key |
+- [x] محدودیت‌های امنیتی پایه (حجم، extension، session per IP)
+- [x] Pause / Resume / سرعت (UI دمو)
+- [x] Serilog + `/health` + `/api/metrics`
 
 ---
 
@@ -33,68 +56,47 @@
 
 | موضوع | تصمیم |
 |-------|--------|
+| نقش در سیستم | **آداپتر آپلود** (نه مونولیت) |
 | پروتکل | HTTP/2 + Chunked REST |
-| gRPC | ❌ |
-| Object Storage خارجی | ❌ |
-| Storage | FileSystem + `IFileStorage` |
-| وضعیت | Pending → Completed |
-| پاکسازی | BackgroundJob + TTL |
-| DB | EF Core + SQLite |
+| gRPC | ❌ برای آپلود مرورگر مناسب نیست |
+| Object Storage خارجی | ❌ فعلاً؛ پشت `IFileStorage` قابل افزودن |
+| Storage پیش‌فرض | FileSystem |
+| Auth | خارج از محدوده (Gateway / Identity) |
+| وضعیت فایل | Pending → Completed |
+| پاکسازی orphan | BackgroundJob + TTL |
 | Checksum | SHA-256 اختیاری |
-| Logging | Serilog |
 
 ---
 
-## 🚀 Backlog
+## 🚀 Backlog (فقط موارد مرتبط با آداپتر)
 
-### 🔴 اولویت ۱ — Critical — ✅
-### 🟠 اولویت ۲ — High — ✅
+### اولویت‌های ۱–۳ — ✅ انجام‌شده
 
-### 🟡 اولویت ۳ — Medium — ✅
+### 🟢 اولویت ۴ — بهبود آداپتر (اختیاری)
 
-- [x] 3.1 Resume UI
-- [x] 3.2 Observability (Serilog / Health / Metrics)
-- [x] 3.3 Client UX
-- [x] 3.4 Staging / Final
+- [ ] سخت‌تر کردن مرز پورت‌ها (مثلاً جدا کردن UI دمو از WebApi اگر لازم شد)
+- [ ] آداپتر storage جایگزین (مثلاً S3-compatible) پشت همان `IFileStorage` — فقط در صورت نیاز
+- [ ] رویداد بعد از complete (مثلاً publish به bus برای virus-scan / indexing) بدون مالکیت آن منطق
+- [ ] GPU-accelerated hashing (آینده، فقط اگر bottleneck واقعی شد)
+- [ ] Brotli / Deflate per-chunk compression (آینده، فقط اگر bandwidth bottleneck شد)
+- [ ] OpenTelemetry exporter سبک (اگر پلتفرم observability مشترک دارید)
 
-### 🟢 اولویت ۴ — Low / Future
+### ⛔ عمداً انجام نمی‌شود در این ریپو
 
-- [ ] Authentication / Authorization (JWT یا API Key)
-- [ ] Rate Limiting پیشرفته
-- [ ] پشتیبانی از HTTP/3
-- [ ] Distributed Upload (چند نود)
-- [ ] Virus Scanning بعد از complete
-- [ ] GPU-accelerated hashing
-- [ ] Brotli / Deflate per-chunk compression
-- [ ] Prometheus / OpenTelemetry exporter (در صورت نیاز production)
+- JWT / Login / User management
+- Rate limiting سطح پلتفرم
+- Virus engine داخل همین process
+- سرویس دانلود / ACL فایل
 
 ---
 
-## 📌 Observability
+## 📌 Observability (سبک، برای خود آداپتر)
 
 | Endpoint | توضیح |
 |----------|--------|
-| `GET /health` | وضعیت process + DB + storage |
-| `GET /api/metrics` | شمارنده‌های in-process آپلود |
-
-لاگ‌ها:
-- Console
-- فایل روزانه: `logs/uploader-YYYYMMDD.log` (۱۴ روز نگه‌داری)
-
-نمونه پاسخ metrics:
-
-```json
-{
-  "initiated": 12,
-  "completed": 10,
-  "failed": 1,
-  "aborted": 1,
-  "chunksUploaded": 340,
-  "bytesCompleted": 524288000,
-  "since": "2026-08-14T07:00:00Z"
-}
-```
+| `GET /health` | process + DB + storage |
+| `GET /api/metrics` | شمارنده‌های in-process |
 
 ---
 
-*آخرین به‌روزرسانی: Observability (3.2) — Serilog + Health + Metrics.*
+*آخرین به‌روزرسانی: هم‌راستاسازی با معماری هگزاگونال — فقط وظیفه آپلود.*
