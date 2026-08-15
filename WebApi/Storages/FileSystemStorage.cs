@@ -104,7 +104,6 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         bool computeHash = true,
         CancellationToken ct = default)
     {
-        // No client checksum → parallel offset merge, skip multi-GB SHA (dominant complete latency).
         if (!computeHash)
             return MergeParallelThenHashAsync(uploadId, fileName, totalChunks, totalSize, chunkSize, hash: false, ct);
 
@@ -341,6 +340,25 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         if (File.Exists(path))
             File.Delete(path);
         return Task.CompletedTask;
+    }
+
+    public Task<bool> FinalObjectExistsAsync(string fileName, long? expectedSize = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+            return Task.FromResult(false);
+
+        // Accept absolute path from merge or bare file name stored in FinalFileName.
+        var path = Path.IsPathRooted(fileName)
+            ? fileName
+            : Path.Combine(_options.FinalPath, Path.GetFileName(fileName));
+
+        if (!File.Exists(path))
+            return Task.FromResult(false);
+
+        if (expectedSize is long size && new FileInfo(path).Length != size)
+            return Task.FromResult(false);
+
+        return Task.FromResult(true);
     }
 
     public Task<string> GetTempFolderAsync(Guid uploadId) =>
