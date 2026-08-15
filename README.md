@@ -1,21 +1,23 @@
 # File Uploader
 
-**S3-inspired, own data-plane file service** for very large uploads — resumable, parallel, multi-instance ready.
+**S3-inspired, own data-plane file service** for very large uploads — resumable, parallel, multi-instance ready, **integrity-first**.
 
 [![.NET](https://img.shields.io/badge/.NET-9-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Architecture](https://img.shields.io/badge/architecture-hexagonal-0ea5e9)](#architecture)
+[![Integrity](https://img.shields.io/badge/integrity-server%20SHA--256%20always-dc2626)](#consistency-vs-integrity)
 [![Multi-instance](https://img.shields.io/badge/multi--instance-CAS%20%2B%20shared%20store-16a34a)](#multi-instance-p4)
-[![Client](https://img.shields.io/badge/client-WebCrypto%20%2B%20Worker-f59e0b)](#client-performance)
+[![Client](https://img.shields.io/badge/client-non--blocking%20hash-f59e0b)](#client-performance)
 [![Proofs](https://img.shields.io/badge/proofs-unit%20%2B%20HTTP%20%2B%20CI-8b5cf6)](#proofs--quality)
 [![Branch](https://img.shields.io/badge/branch-dev-blue)](https://github.com/0x-mhmdnzri/File-Uploader/tree/dev)
 
-> Upload **5 GB – 20 GB+** with chunked parallel transfers, **hardware WebCrypto hashing that does not block upload**, disk-as-truth verification, pre-allocated merge, and **Postgres CAS** so any healthy node can finish the job — **no sticky load balancer required**.
+> Upload **5 GB – 20 GB+** with chunked parallel transfers, **disk-as-truth** part verification, **Postgres CAS** so only one node merges under a load balancer, and **mandatory server-side SHA-256** so content integrity is never optional — **no sticky sessions required**.
 
 ---
 
 ## Table of contents
 
 - [Why this project](#why-this-project)
+- [Consistency vs integrity](#consistency-vs-integrity)
 - [Feature matrix](#feature-matrix)
 - [Architecture](#architecture)
 - [Performance engine (server)](#performance-engine-server)
@@ -40,12 +42,74 @@ Most “chunked upload” demos break under real conditions:
 |------|---------------------|
 | Lost chunk marks under concurrency | **Disk is source of truth**; in-memory is only a hint |
 | Merge serializes on a global lock | **Pre-allocate + parallel offset writes** |
-| Client hash blocks the whole start | **WebCrypto / Worker hash in parallel with upload** |
+| Client hash blocks multi-GB start / end | **Non-blocking client hash**; **server always digests** |
+| Skipping client hash skips integrity | **`AlwaysComputeFullChecksum`** — server SHA never optional |
 | “HA” = sticky LB | **Shared metadata + shared parts + CAS** |
+| Two nodes complete at once | `Pending → Completing → Completed/Failed` **CAS** |
 | In-process locks as “distributed” | Explicit **non-goals** + fail-fast startup guard |
-| Complete race across nodes | `Pending → Completing → Completed/Failed` **CAS** |
 
 This is an **owned file service** (product plane = your volume / future blob nodes), not a thin wrapper around public S3 as the system of record.
+
+---
+
+## Consistency vs integrity
+
+These are **two different guarantees**. Confusing them is how systems either race under a load balancer or silently accept corrupted bytes.
+
+```mermaid
+flowchart LR
+  subgraph Consistency["Distributed consistency"]
+    CAS[DB CAS lease]
+    DISK[Shared parts + disk listing]
+    IDEM[Idempotent PUT]
+  end
+
+  subgraph Integrity["Content integrity"]
+    VER[Parallel part verify]
+    MERGE[Single-pass merge]
+    SHA[Server SHA-256 always]
+  end
+
+  PUT[Chunk PUTs] --> IDEM --> DISK
+  COMPLETE[POST /complete] --> CAS
+  CAS -->|one winner| VER --> MERGE --> SHA
+  SHA --> DONE[Completed + stored digest]
+```
+
+### What each layer protects
+
+| Layer | Mechanism | Failure mode if removed |
+|-------|-----------|-------------------------|
+| **Coordination** | CAS `Pending → Completing` (only one node wins) | Two nodes merge the same upload → torn final file / double-write |
+| **Part truth** | Shared volume + list/verify on disk | Node-local memory says “all chunks here” when they are not |
+| **Idempotent PUT** | Existence check before rewrite | Retry storms corrupt or thrash the same part |
+| **Byte integrity** | **Server full-file SHA-256 on every complete** | Bit flips, truncated parts, silent garbage accepted as `Completed` |
+| **Optional cross-check** | Client checksum compared when present | Weaker early detection only — **never** a substitute for server hash |
+
+### Rules of the system
+
+1. **CAS answers:** *Who is allowed to merge right now?*  
+2. **Disk answers:** *Are all parts present and sized correctly?*  
+3. **SHA-256 answers:** *Is the assembled object the intended bitstream?*  
+4. **Client hash answers (optional):** *Did the browser’s view of the file match?* — useful cross-check for small files, **not** the distributed control plane.
+
+### Why client SHA is not the multi-node safety net
+
+- Standard **SHA-256 is sequential**. You cannot shard a single digest across cores and get the same official hash without changing the algorithm (Merkle trees ≠ SHA-256 of the whole file).
+- Waiting for a browser to hash **7 GB+** after a fast parallel upload creates a multi-minute **“Verifying…”** stall that is pure client CPU — while the cluster already has the parts on shared storage.
+- **Failover / LB races are prevented by CAS + shared store**, not by the browser finishing `subtle.digest`.
+
+### Server policy (authoritative)
+
+| Setting | Default | Meaning |
+|---------|---------|--------|
+| **`AlwaysComputeFullChecksum`** | **`true`** | Complete **always** runs full-file SHA-256, even if the client sent no checksum |
+| **`SinglePassMergeAndHash`** | **`true`** | Merge and hash in one ordered disk pass (avoid reading the final object twice) |
+| **`Hasher`** | `Hardware` | Prefer OS / hardware crypto on the server |
+
+If the client **does** send a checksum and it disagrees with the server digest → complete **fails**, final object is deleted, session → `Failed` (`checksum_mismatch`).
+
+> **Lab only:** set `AlwaysComputeFullChecksum: false` to skip digest for speed tests. Never do that in multi-instance production.
 
 ---
 
@@ -59,12 +123,13 @@ This is an **owned file service** (product plane = your volume / future blob nod
 | Parallel workers (browser) | ✅ | Adaptive 2–6 from throughput |
 | Resume / status from disk listing | ✅ | `GET /status` → `received[]` |
 | Idempotent chunk PUT | ✅ | `{ idempotent: true }` if part exists |
-| Optional Content-Encoding (`gzip` / `deflate` / `br`) | ✅ | Per-chunk decompress on server |
-| Optional per-chunk CRC32 / SHA-256 | ✅ | Headers; chunk SHA via **WebCrypto** when available |
-| Full-file SHA-256 (client) | ✅ | WebCrypto ≤512MB · Worker stream above |
-| Hash **parallel to upload** | ✅ | Initiate/upload do not wait for client hash |
-| Full-file SHA-256 on complete (server) | ✅ | Single-pass or parallel-then-hash |
-| Pre-allocated parallel merge | ✅ | Non-overlapping offsets |
+| Optional Content-Encoding | ✅ | `gzip` / `deflate` / `br` per chunk |
+| Optional per-chunk CRC32 / SHA-256 | ✅ | CRC32 via lookup **table**; chunk SHA via WebCrypto |
+| Client full-file SHA (≤512 MB) | ✅ | WebCrypto; **never blocks complete** |
+| Client full-file SHA (>512 MB) | ✅ **skipped** | Server is authoritative; avoids end-of-upload stall |
+| **Server full-file SHA on complete** | ✅ **always** | `AlwaysComputeFullChecksum` |
+| Single-pass merge + hash | ✅ | Default on |
+| Pre-allocated parallel merge mode | ✅ | Config alternative to single-pass |
 | Orphan / TTL cleanup | ✅ | Cluster-safe CAS claim |
 | Abort | ✅ | CAS `Pending → Aborted` |
 
@@ -82,24 +147,17 @@ This is an **owned file service** (product plane = your volume / future blob nod
 | Client contract (no sticky) | ✅ | [docs/CLIENT-CONTRACT.md](docs/CLIENT-CONTRACT.md) |
 | Unit + HTTP + two-node CI proofs | ✅ | [docs/PROOFS.md](docs/PROOFS.md) |
 | Owned blob nodes design | ✅ design | [docs/OWNED-BLOB-NODES.md](docs/OWNED-BLOB-NODES.md) |
-| EF migrations (not EnsureCreated) | ✅ | [docs/MIGRATIONS.md](docs/MIGRATIONS.md) |
-| DB bootstrap + schema safety net | ✅ | Migrate + EnsureCreated fallback |
+| EF migrations + bootstrap safety net | ✅ | [docs/MIGRATIONS.md](docs/MIGRATIONS.md) |
 
 ### Platform & DX
 
 | Feature | Status |
 |---------|--------|
-| Hexagonal ports (`IFileStorage`, `IUploadRepository`, …) | ✅ |
-| FileSystem storage (product plane) | ✅ |
-| S3-compatible adapter (experimental / lab) | ✅ |
+| Hexagonal ports | ✅ |
+| FileSystem product plane / S3 lab adapter | ✅ |
 | API key auth + anonymous health | ✅ |
-| Quotas (global + per-IP) | ✅ |
-| Serilog + audit log | ✅ |
-| Metrics snapshot | ✅ |
-| Domain events (log / webhook / RabbitMQ) | ✅ |
-| Hardware or CPU SHA-256 hasher (server) | ✅ |
-| Storage micro-bench tool | ✅ |
-| Dev CORS: any `localhost` / `127.0.0.1` origin | ✅ |
+| Quotas, Serilog, audit, metrics, events | ✅ |
+| Dev CORS any `localhost` / `127.0.0.1` | ✅ |
 | WebApp `ApiBase` → `http://localhost:5073` | ✅ |
 
 ---
@@ -110,7 +168,7 @@ This is an **owned file service** (product plane = your volume / future blob nod
 flowchart TB
   subgraph Clients
     Browser[Browser / SDK]
-    Hash[WebCrypto or Worker hash]
+    OptHash[Optional client hash ≤512MB]
     Up[Parallel chunk PUT]
   end
 
@@ -118,19 +176,19 @@ flowchart TB
     LB[Load balancer<br/>no sticky required]
   end
 
-  subgraph API["API nodes (stateless front)"]
+  subgraph API["API nodes"]
     A1[API A]
     A2[API B]
   end
 
   subgraph Data plane
-    PG[(Postgres<br/>sessions + CAS)]
+    PG[(Postgres<br/>session CAS)]
     VOL[Shared volume<br/>parts + finals]
   end
 
-  Browser --> Hash
+  Browser --> OptHash
   Browser --> Up
-  Hash -.->|checksum at complete| Up
+  OptHash -.->|optional cross-check| Up
   Up --> LB
   LB --> A1
   LB --> A2
@@ -140,6 +198,30 @@ flowchart TB
   A2 --> VOL
 ```
 
+**Complete path (winner node only)**
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant API as Winning API node
+  participant DB as Postgres
+  participant FS as Shared store
+
+  C->>API: POST /complete (checksum optional)
+  API->>DB: CAS Pending → Completing
+  alt lost CAS
+    API-->>C: conflict — poll status
+  else won lease
+    API->>FS: parallel verify all parts
+    API->>FS: single-pass merge + SHA-256
+    opt client sent checksum
+      API->>API: compare digests
+    end
+    API->>DB: CAS Completing → Completed + store digest
+    API-->>C: 200 + path
+  end
+```
+
 **Ports & adapters**
 
 | Port | Adapter(s) |
@@ -147,9 +229,9 @@ flowchart TB
 | `IUploadRepository` | `EfUploadRepository` (Sqlite / Postgres) |
 | `IFileStorage` | `FileSystemStorage` (product), `S3FileStorage` (lab) |
 | `IFileHasher` | `HardwareSha256FileHasher` / `Sha256FileHasher` |
-| `IUploadEventPublisher` | Channel bus → logging / webhook / RabbitMQ handlers |
+| `IUploadEventPublisher` | Channel bus → logging / webhook / RabbitMQ |
 
-**Part layout (stable key)**
+**Part layout**
 
 ```text
 {TempPath}/{uploadId:N}/part/0
@@ -167,131 +249,84 @@ flowchart TB
 | File size | Naive / early design | Current engine |
 |-----------|----------------------|----------------|
 | ~1 GB | ~90–120 s | **~25–40 s** |
-| ~7 GB | ~20–30 min | **~6–10 min** |
+| ~7 GB | ~20–30 min | **~6–10 min** transfer; complete dominated by **merge+hash IO** |
 | 12 GB+ | Unstable / failed | **Stable** (limits permitting) |
 
-*Wall times are network- and disk-dependent; the engine optimizes merge, verification, GC, and IO contention.*
+*End-of-upload time on multi-GB files is intentionally mostly **server disk + SHA**, not browser JavaScript.*
 
-### What we use in C# (and why)
+### C# primitives
 
 | Primitive | Role |
 |-----------|------|
-| **`Parallel.ForEachAsync`** | Structured parallel verify + offset merge |
-| **`ConcurrentBag`** | Collect missing chunk indexes without caller locks |
-| **`Interlocked`** | Atomic on-disk byte totals during verify |
-| **`ConcurrentDictionary`** | Lock-free local received hints |
-| **`SemaphoreSlim`** | Global disk IO gate (back-pressure) |
-| **`ArrayPool<byte>` + `Memory`/`Span`** | Reused buffers, lower GC on hot path |
-| **Pre-allocate `SetLength` + seek writes** | No global merge lock; ranges do not overlap |
-| **EF `ExecuteUpdateAsync` CAS** | Cross-node complete / abort / expire leases |
-
-### Merge path (high level)
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant API as API node
-  participant DB as Postgres
-  participant FS as Shared store
-
-  C->>API: POST /complete
-  API->>DB: CAS Pending → Completing
-  alt lost CAS
-    API-->>C: retry / poll status
-  else won lease
-    API->>FS: parallel verify parts
-    API->>FS: SetLength + parallel offset merge
-    API->>FS: SHA-256
-    API->>DB: CAS Completing → Completed
-    API-->>C: 200 + path
-  end
-```
-
-**Consistency rule:** filesystem listing wins at complete; session cache is never trusted for merge decisions.
+| **`Parallel.ForEachAsync`** | Parallel part verify / optional parallel merge |
+| **`ConcurrentBag`** | Missing indexes without caller locks |
+| **`Interlocked`** | Atomic on-disk byte totals |
+| **`ConcurrentDictionary`** | Lock-free received hints (not truth) |
+| **`SemaphoreSlim`** | Global disk IO gate |
+| **`ArrayPool` + `Memory`/`Span`** | Lower GC on hot path |
+| **EF CAS (`ExecuteUpdateAsync`)** | Cross-node complete / abort / expire |
+| **Hardware hasher** | Full-file digest on complete |
 
 ---
 
 ## Client performance
 
-Browser uploader (`WebApp/wwwroot/js/upload.js`) is tuned so **checksum work does not sit on the critical path** of starting the transfer.
+Browser uploader: `WebApp/wwwroot/js/upload.js`.
 
-### Hash strategy
+### Full-file hash policy (current)
 
-| File size | Path | Why |
-|-----------|------|-----|
-| **≤ 512 MB** | **`crypto.subtle.digest('SHA-256')`** one-shot | Native / **hardware-backed** on modern CPUs (AES-NI, ARM crypto extensions where the browser exposes them) |
-| **> 512 MB** | **Web Worker** + 16 MB streaming slices | Keeps the **main thread free** for UI + parallel PUT workers |
-| Worker unavailable | Main-thread stream, yield only every ~64 MB | Still far fewer yields than the old 2 MB + `setTimeout` loop |
+| File size | Client behavior | Why |
+|-----------|-----------------|-----|
+| **≤ 512 MB** | Optional **WebCrypto** one-shot in parallel with upload | Fast, hardware-backed when the browser allows |
+| **> 512 MB** | **No client full-file SHA** | Sequential hash would stall the UI after a fast parallel upload |
+| **At `complete`** | **Never awaits** an unfinished client hash | Sends checksum only if already ready; otherwise server-only digest |
 
-Per-chunk SHA (when the server requires `X-Chunk-SHA256`) also prefers **WebCrypto** over pure JS.
+Per-chunk integrity (when enabled by server):
 
-### Parallel with upload (biggest UX win)
-
-```mermaid
-sequenceDiagram
-  participant UI as Browser
-  participant H as Hash path<br/>WebCrypto / Worker
-  participant API as WebApi
-
-  UI->>H: start hash (async)
-  UI->>API: POST /initiate (no wait for hash)
-  par Upload
-    UI->>API: PUT chunks (N workers)
-  and Hash
-    H-->>UI: hex when ready
-  end
-  UI->>API: POST /complete (+ checksum if ready)
-```
-
-1. Hash starts immediately in the background.  
-2. **`initiate` and chunk PUTs run without waiting** for the full-file digest.  
-3. Before **`complete`**, the client awaits the hash promise (if still running) and sends the checksum when available.  
-4. If client hash fails, upload can still finish; **server-side hash** remains authoritative at complete.
+- **CRC32** — classic **256-entry lookup table** (hash table) for O(1) per byte  
+- **SHA-256** — prefers `crypto.subtle` over pure JS
 
 ### Upload workers
 
-- Default chunk size **16 MB** → fewer HTTP round-trips.  
-- **2–6 concurrent workers**, adapted from measured MB/s.  
-- Pause / resume / cancel with session resume via `localStorage` + `GET /status`.
+- Chunk size **16 MB**  
+- **2–6** concurrent workers, adapted from measured MB/s  
+- Pause / resume / cancel + `localStorage` resume + `GET /status`
 
 ### Dev wiring
 
 | Setting | Value |
 |---------|--------|
 | WebApp `ApiBase` | `http://localhost:5073` |
-| WebApi CORS (Development) | Any origin on `localhost` / `127.0.0.1` |
-| WebApi HTTP profile | `http://localhost:5073` |
-| WebApp HTTP profile | `http://localhost:5074` |
+| WebApi CORS (Development) | Any `localhost` / `127.0.0.1` origin |
+| Profiles | API `http://localhost:5073` · App `http://localhost:5074` |
 
 ---
 
 ## Multi-instance (P4)
 
-### Non-goals (enforced when `MultiInstance:Enabled=true`)
+### Non-goals (`MultiInstance:Enabled=true`)
 
 | ID | Non-goal |
 |----|----------|
-| **NG1** | Fix multi-node with only `SemaphoreSlim` / `Mutex` / `ConcurrentDictionary` |
-| **NG2** | Sticky load balancer as HA |
-| **NG3** | External S3/MinIO as the *product* data plane |
+| **NG1** | In-process locks as cross-node coordination |
+| **NG2** | Sticky LB as HA |
+| **NG3** | External S3/MinIO as product data plane |
 
-### Coordination (thin, DB-based)
+### Coordination
 
 | Operation | CAS |
 |-----------|-----|
-| Complete | `Pending → Completing` → merge → `Completed` / `Failed` |
+| Complete | `Pending → Completing` → merge+hash → `Completed` / `Failed` |
 | Abort | `Pending → Aborted` |
-| Orphan cleanup | `(Pending\|Completing) + expired → Expired` (winner deletes parts) |
+| Orphan cleanup | Expired claim → `Expired` (one winner deletes parts) |
 
-### Health for the load balancer
+### Health
 
 | Endpoint | Meaning |
 |----------|--------|
-| `GET /health/live` | Process up |
-| `GET /health/ready` | **DB + storage writable** (pool membership) |
-| `GET /health` | Aggregate |
-
-Details: [docs/MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md) · [docs/PROXY.md](docs/PROXY.md) · [docs/CLIENT-CONTRACT.md](docs/CLIENT-CONTRACT.md)
+| `/health/live` | Process up |
+| `/health/ready` | DB + storage writable |
+| `/health` | Aggregate |
 
 ---
 
@@ -299,32 +334,32 @@ Details: [docs/MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md) · [docs/PROXY.md](doc
 
 | Method | Path | Purpose |
 |--------|------|--------|
-| `POST` | `/api/uploads/initiate` | Create session (`uploadId`, `totalChunks`, …) |
-| `PUT` | `/api/uploads/{id}/chunk/{index}` | Upload / re-upload one part (**idempotent**) |
-| `GET` | `/api/uploads/{id}/status` | Progress; `received` from **disk** |
-| `POST` | `/api/uploads/{id}/complete` | Verify → merge → checksum |
+| `POST` | `/api/uploads/initiate` | Create session |
+| `PUT` | `/api/uploads/{id}/chunk/{index}` | Idempotent part upload |
+| `GET` | `/api/uploads/{id}/status` | Disk-backed progress |
+| `POST` | `/api/uploads/{id}/complete` | CAS → verify → merge → **always SHA** → finish |
 | `DELETE` | `/api/uploads/{id}` | Abort |
 | `GET` | `/health/live` · `/health/ready` · `/health` | Probes |
-| `GET` | `/api/metrics` | Counters snapshot |
+| `GET` | `/api/metrics` | Snapshot |
 
-### Client contract (short)
+### Client contract
 
 1. Any healthy node may handle any step for an `uploadId`.  
 2. Retry chunk PUT on 502/503/timeout.  
-3. Rebuild progress from `GET /status` after reconnect.  
-4. On complete CAS conflict, poll status until terminal.  
-5. Client full-file checksum is **optional** at initiate; preferred at complete when the parallel hash finishes.
+3. Rebuild progress from `GET /status`.  
+4. On complete CAS conflict, poll until terminal.  
+5. Client full-file checksum is **optional**; **server digest is mandatory**.  
+6. If both exist and differ → complete fails (integrity).
 
 ---
 
 ## Security, quotas & observability
 
-- **API key** middleware (`Auth:Enabled`, header configurable); `/health*` anonymous by default  
-- **Extension allow/block lists**, max file / chunk size  
-- **Quotas:** max pending sessions per IP, max stored bytes global & per IP  
-- **Serilog** console + rolling files; dedicated **audit** sink  
-- **Domain events:** initiated / completed / aborted / failed → log, webhook, optional RabbitMQ  
-- **Health checks** on database + storage probe files  
+- API key middleware; `/health*` anonymous by default  
+- Extension allow/block lists; max file / chunk size  
+- Quotas: pending per IP; stored bytes global & per IP  
+- Serilog + audit; domain events (log / webhook / RabbitMQ)  
+- Health: database + storage probes  
 
 ---
 
@@ -335,73 +370,51 @@ git clone https://github.com/0x-mhmdnzri/File-Uploader.git
 cd File-Uploader
 git checkout dev
 
-# API (Sqlite lab — MultiInstance left false)
 dotnet run --project WebApi --launch-profile http
-
-# UI (other terminal)
+# other terminal
 dotnet run --project WebApp --launch-profile http
 ```
 
-Open **http://localhost:5074** — the page talks to **http://localhost:5073**.
+Open **http://localhost:5074** → API **http://localhost:5073**.
 
-> **Note:** Boot applies **EF migrations** (with schema safety net). If you still have a broken lab `uploads.db`, delete it once or follow [docs/MIGRATIONS.md](docs/MIGRATIONS.md).
-
-### Unit proofs (no server)
+> Boot applies **EF migrations** (with schema safety net). Broken lab DB → delete `uploads.db` or see [docs/MIGRATIONS.md](docs/MIGRATIONS.md).
 
 ```bash
 dotnet test tests/WebApi.Tests/WebApi.Tests.csproj -v n
-```
-
-### HTTP proofs (API running)
-
-```bash
-chmod +x tools/proofs/http-proofs.sh
-BASE=http://localhost:5073 ./tools/proofs/http-proofs.sh
+chmod +x tools/proofs/http-proofs.sh && BASE=http://localhost:5073 ./tools/proofs/http-proofs.sh
 ```
 
 ---
 
 ## Multi-node lab (Docker)
 
-Two API processes, one Postgres, one shared volume — the real multi-instance shape:
-
 ```bash
 docker compose -f docker-compose.multi.yml up --build -d
-
-curl -sf http://localhost:5073/health/ready | jq .
-curl -sf http://localhost:5075/health/ready | jq .
-
 BASE_A=http://localhost:5073 BASE_B=http://localhost:5075 ./tools/proofs/http-proofs.sh
-
 docker compose -f docker-compose.multi.yml down -v
 ```
 
 | Service | Port |
 |---------|------|
-| `api-a` | **5073** |
-| `api-b` | **5075** |
+| `api-a` / `api-b` | **5073** / **5075** |
 | Postgres | 5432 |
 
-CI runs the same path on push to `dev` / `main` (`.github/workflows/proofs.yml`).
+CI: `.github/workflows/proofs.yml`.
 
 ---
 
 ## Proofs & quality
 
-| Layer | What it proves |
-|-------|----------------|
-| **xUnit CAS tests** | Only one winner for complete / abort / expire under parallel load |
-| **http-proofs.sh** | Happy path, idempotent PUT, double-complete, readiness |
-| **Docker two-node** | Shared volume + Postgres across processes |
-| **GitHub Actions** | Automated gate on `dev` / `main` |
-
-Runbook: [docs/PROOFS.md](docs/PROOFS.md)
+| Layer | Proves |
+|-------|--------|
+| xUnit CAS | One winner for complete / abort / expire |
+| `http-proofs.sh` | Happy path, idempotent PUT, double-complete |
+| Docker two-node | Shared volume + Postgres |
+| GitHub Actions | Gate on `dev` / `main` |
 
 ---
 
 ## Configuration
-
-Key sections in `WebApi/appsettings.json`:
 
 ```json
 {
@@ -421,6 +434,7 @@ Key sections in `WebApi/appsettings.json`:
     "MaxConcurrentDiskIo": 8,
     "MergeParallelism": 4,
     "SinglePassMergeAndHash": true,
+    "AlwaysComputeFullChecksum": true,
     "Hasher": "Hardware"
   },
   "Auth": {
@@ -431,18 +445,13 @@ Key sections in `WebApi/appsettings.json`:
 }
 ```
 
-WebApp (`WebApp/appsettings.json`):
+| Key | Production guidance |
+|-----|---------------------|
+| `AlwaysComputeFullChecksum` | **Keep `true`** |
+| `SinglePassMergeAndHash` | `true` when complete is hash/IO bound |
+| `MultiInstance:Enabled` | Requires Postgres + shared part store |
 
-```json
-{
-  "ApiBase": "http://localhost:5073",
-  "ApiKey": ""
-}
-```
-
-**Multi-node minimum:** `Database:Provider=Postgres`, shared `TempPath`/`FinalPath`, `MultiInstance:Enabled=true`, `SharedPartStoreConfigured=true`.
-
-More: [docs/CONFIG.md](docs/CONFIG.md)
+WebApp: `"ApiBase": "http://localhost:5073"`.
 
 ---
 
@@ -450,26 +459,26 @@ More: [docs/CONFIG.md](docs/CONFIG.md)
 
 | Doc | Content |
 |-----|--------|
-| [MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md) | P4 non-goals, CAS, shared store, LB |
-| [CLIENT-CONTRACT.md](docs/CLIENT-CONTRACT.md) | Retries, status, complete semantics |
-| [PROXY.md](docs/PROXY.md) | nginx / Caddy / k8s probes |
-| [PROOFS.md](docs/PROOFS.md) | How to run and interpret proofs |
-| [MIGRATIONS.md](docs/MIGRATIONS.md) | EF migrate vs old EnsureCreated DBs |
-| [OWNED-BLOB-NODES.md](docs/OWNED-BLOB-NODES.md) | Next-gen data plane design (D8) |
-| [CONFIG.md](docs/CONFIG.md) | Settings reference |
-| [BENCH.md](docs/BENCH.md) | Storage micro-bench |
-| [BACKLOG.md](BACKLOG.md) | Delivery checklist |
+| [MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md) | Non-goals, CAS, shared store, LB |
+| [CLIENT-CONTRACT.md](docs/CLIENT-CONTRACT.md) | Retries, status, complete |
+| [PROXY.md](docs/PROXY.md) | nginx / Caddy / k8s |
+| [PROOFS.md](docs/PROOFS.md) | Proof runbook |
+| [MIGRATIONS.md](docs/MIGRATIONS.md) | EF migrate |
+| [OWNED-BLOB-NODES.md](docs/OWNED-BLOB-NODES.md) | Future data plane |
+| [CONFIG.md](docs/CONFIG.md) | Settings |
+| [BACKLOG.md](BACKLOG.md) | Checklist |
 
 ---
 
 ## Design principles
 
-1. **Disk is truth** for parts; metadata CAS is truth for session state.  
-2. **Bound concurrency** — parallelism without an IO gate is a latency regression.  
-3. **No sticky LB for correctness** — shared store + CAS instead.  
-4. **Client hash must not block the upload pipe** — WebCrypto / Worker + await only at complete.  
-5. **Fail fast at boot** when multi-instance is claimed without prerequisites.  
-6. **Prove it** — unit CAS, HTTP scripts, two-node compose, CI.
+1. **Disk is truth** for parts; **CAS is truth** for who may merge.  
+2. **Server SHA-256 is mandatory** for completed objects (`AlwaysComputeFullChecksum`).  
+3. **Client hash is optional UX**, never the distributed control plane, and must **not block** complete.  
+4. **Bound concurrency** — parallelism without an IO gate regresses p99.  
+5. **No sticky LB for correctness.**  
+6. **Fail fast at boot** when multi-instance is claimed without prerequisites.  
+7. **Prove it** — unit CAS, HTTP scripts, two-node compose, CI.
 
 ---
 
@@ -477,14 +486,14 @@ More: [docs/CONFIG.md](docs/CONFIG.md)
 
 | Item | Status |
 |------|--------|
-| Blob node **implementation** (from D8 design) | Future |
-| WASM hash (e.g. hash-wasm) for multi-GB streaming | Optional |
-| Provider-split EF migrations if SQL diverges | Only if needed |
+| Blob node implementation (D8) | Future |
+| WASM client hash for medium files | Optional |
+| Provider-split EF migrations | Only if needed |
 
 ---
 
 **Maintainer:** Mohammad Nazari  
-**.NET 9 · high-throughput IO · concurrency-conscious · multi-instance file pipelines**
+**.NET 9 · high-throughput IO · CAS coordination · mandatory content integrity**
 
 ```bash
 git checkout dev && dotnet run --project WebApi --launch-profile http
