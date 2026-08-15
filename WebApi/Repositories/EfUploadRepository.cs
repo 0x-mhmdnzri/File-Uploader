@@ -43,6 +43,7 @@ public class EfUploadRepository : IUploadRepository
         tracked.CompletedAt = session.CompletedAt;
         tracked.ExpiresAt = session.ExpiresAt;
         tracked.Checksum = session.Checksum;
+        tracked.ContentFingerprint = session.ContentFingerprint;
         tracked.ContentType = session.ContentType;
         tracked.ClientIp = session.ClientIp;
         tracked.ReceivedChunksCsv = session.ReceivedChunksCsv;
@@ -84,6 +85,26 @@ public class EfUploadRepository : IUploadRepository
             .Where(x => x.Status == UploadStatus.Completed
                         && x.TotalSize == totalSize
                         && x.Checksum == hash
+                        && x.FinalFileName != null)
+            .OrderByDescending(x => x.CompletedAt)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    public Task<UploadSession?> FindCompletedByFingerprintAsync(
+        string contentFingerprintHex,
+        long totalSize,
+        CancellationToken ct = default)
+    {
+        var fp = contentFingerprintHex.Trim().ToLowerInvariant();
+        if (fp.StartsWith("fp:"))
+            fp = fp[3..];
+        else if (fp.StartsWith("sample:"))
+            fp = fp[7..];
+
+        return _db.UploadSessions.AsNoTracking()
+            .Where(x => x.Status == UploadStatus.Completed
+                        && x.TotalSize == totalSize
+                        && x.ContentFingerprint == fp
                         && x.FinalFileName != null)
             .OrderByDescending(x => x.CompletedAt)
             .FirstOrDefaultAsync(ct);
@@ -148,6 +169,7 @@ public class EfUploadRepository : IUploadRepository
         Guid id,
         string finalFileName,
         string? checksum,
+        string? contentFingerprint = null,
         CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
@@ -157,6 +179,7 @@ public class EfUploadRepository : IUploadRepository
                     .SetProperty(x => x.Status, UploadStatus.Completed)
                     .SetProperty(x => x.FinalFileName, finalFileName)
                     .SetProperty(x => x.Checksum, checksum)
+                    .SetProperty(x => x.ContentFingerprint, contentFingerprint)
                     .SetProperty(x => x.CompletedAt, now)
                     .SetProperty(x => x.Version, x => x.Version + 1),
                 ct);
