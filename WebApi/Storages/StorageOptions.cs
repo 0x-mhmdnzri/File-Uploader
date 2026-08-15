@@ -4,9 +4,6 @@ public class StorageOptions
 {
     public const string SectionName = "StorageOptions";
 
-    /// <summary>
-    /// "FileSystem" (default) or "S3" (AWS/MinIO/R2 via ObjectStorage section).
-    /// </summary>
     public string Provider { get; set; } = "FileSystem";
 
     public string TempPath { get; set; } = "temp";
@@ -30,36 +27,27 @@ public class StorageOptions
     public long MaxTotalStoredBytes { get; set; } = 200L * 1024 * 1024 * 1024;
     public long MaxStoredBytesPerIp { get; set; } = 50L * 1024 * 1024 * 1024;
 
-    /// <summary>
-    /// Global concurrent disk/object IO gate. 0 = clamp(ProcessorCount, 2, 16).
-    /// </summary>
     public int MaxConcurrentDiskIo { get; set; } = 8;
 
-    /// <summary>
-    /// Parallelism for offset merge / parallel verify.
-    /// </summary>
     public int MergeParallelism { get; set; } = 4;
 
-    /// <summary>
-    /// true = ordered single-pass merge+SHA (prefer when complete() hash dominates).
-    /// false = parallel offset assemble then hash (prefer on fast SSD assemble-bound).
-    /// </summary>
     public bool SinglePassMergeAndHash { get; set; } = true;
 
     /// <summary>
-    /// When true (default), complete always computes full-file SHA-256 even if the client
-    /// did not send a checksum. Required for integrity under multi-instance / shared store.
-    /// Set false only for lab speed tests.
+    /// When true (default), complete always computes full-file SHA-256.
     /// </summary>
     public bool AlwaysComputeFullChecksum { get; set; } = true;
+
+    /// <summary>
+    /// When true (default) and client sends SHA-256 at initiate, return existing Completed
+    /// session if checksum + size match and the final object still exists on the shared store.
+    /// </summary>
+    public bool DeduplicateByContent { get; set; } = true;
 
     public bool RequireChunkCrc32 { get; set; } = false;
     public bool RequireChunkSha256 { get; set; } = false;
 
     public int SessionCacheTtlSeconds { get; set; } = 30;
 
-    /// <summary>
-    /// "Cpu" (default Sha256FileHasher) or "Hardware" (IncrementalHash / OS crypto).
-    /// </summary>
     public string Hasher { get; set; } = "Hardware";
 }
