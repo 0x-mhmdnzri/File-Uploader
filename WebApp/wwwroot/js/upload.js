@@ -18,12 +18,8 @@ window.uploaderInit = function (apiBase, apiKey) {
     const MIN_WORKERS = 2;
     const MAX_WORKERS_CAP = 6;
     const STORAGE_KEY = 'fileUploaderSession';
-    /**
-     * Full-file client SHA-256 only for files at or below this size (WebCrypto one-shot).
-     * Larger files: skip client digest entirely — SHA-256 is sequential; waiting for it
-     * after a fast 7GB upload causes multi-minute "Verifying..." stalls. Server hashes at complete.
-     */
-    const CLIENT_FULL_HASH_MAX = 512 * 1024 * 1024;
+    /** WebCrypto one-shot ceiling (memory). Larger files stream in a Worker. */
+    const WEBCYPTO_MAX = 512 * 1024 * 1024;
     const HASH_SLICE = 16 * 1024 * 1024;
     const API_KEY = apiKey || '';
     const HAS_SUBTLE = !!(globalThis.crypto && crypto.subtle && crypto.subtle.digest);
@@ -174,16 +170,12 @@ window.uploaderInit = function (apiBase, apiKey) {
             totalBitsLo = (totalBitsLo + bits) >>> 0;
             if (totalBitsLo < bits) totalBitsHi++;
             totalBitsHi = (totalBitsHi + ((len / 0x20000000) | 0)) >>> 0;
-
             while (off < len) {
                 const take = Math.min(64 - bufLen, len - off);
                 buf.set(u8.subarray(off, off + take), bufLen);
                 bufLen += take;
                 off += take;
-                if (bufLen === 64) {
-                    compress(buf);
-                    bufLen = 0;
-                }
+                if (bufLen === 64) { compress(buf); bufLen = 0; }
             }
         }
 
@@ -210,7 +202,6 @@ window.uploaderInit = function (apiBase, apiKey) {
             block[62] = (lenBits >>> 8) & 0xff;
             block[63] = lenBits & 0xff;
             compress(block);
-
             function w4(x) {
                 return [x>>>24, (x>>>16)&0xff, (x>>>8)&0xff, x&0xff]
                     .map(b => b.toString(16).padStart(2, '0')).join('');
@@ -230,7 +221,6 @@ window.uploaderInit = function (apiBase, apiKey) {
         return h.hexDigest();
     }
 
-    /** CRC32 lookup table (hash table) — O(1) per byte, used for optional per-chunk checks. */
     function crc32Hex(u8) {
         const table = crc32Hex._t || (crc32Hex._t = (function () {
             const t = new Uint32Array(256);
@@ -247,50 +237,62 @@ window.uploaderInit = function (apiBase, apiKey) {
     }
 
     /**
-     * Settled-aware promise: complete() can read value without awaiting if still running.
+     * Full-file SHA-256 for content-addressed dedupe at initiate.
+     * ≤512MB: WebCrypto. Larger: streaming pure-JS in Worker (off main thread).
      */
-    function trackAsync(promise) {
-        const state = { done: false, value: null, error: null };
-        const p = Promise.resolve(promise).then(
-            (v) => { state.done = true; state.value = v; return v; },
-            (e) => { state.done = true; state.error = e; return null; }
-        );
-        p.peek = () => state;
-        return p;
-    }
+    async function computeFullFileSha256(file) {
+        if (cancelRequested || !file || file.size <= 0) return null;
 
-    /**
-     * Client full-file SHA-256 only when cheap (WebCrypto, ≤ CLIENT_FULL_HASH_MAX).
-     * Returns null immediately for large files — server is authoritative.
-     */
-    function startClientFullHash(file) {
-        if (cancelRequested) return trackAsync(Promise.resolve(null));
-        if (!file || file.size <= 0) return trackAsync(Promise.resolve(null));
-
-        if (file.size > CLIENT_FULL_HASH_MAX) {
-            console.log(
-                '[UPLOAD] File > ' + (CLIENT_FULL_HASH_MAX / (1024 * 1024)) +
-                'MB; skipping client-side full SHA-256 (server verifies on complete).'
-            );
-            return trackAsync(Promise.resolve(null));
+        if (HAS_SUBTLE && file.size <= WEBCYPTO_MAX) {
+            setStatus('Fingerprinting (WebCrypto)...');
+            setProgress(0, 'Hash...');
+            const buf = await file.arrayBuffer();
+            if (cancelRequested) return null;
+            setProgress(80, 'Hash...');
+            const hex = await sha256Subtle(buf);
+            setProgress(100, 'Hash done');
+            return hex;
         }
 
-        if (!HAS_SUBTLE) {
-            console.log('[UPLOAD] WebCrypto unavailable; skipping client full hash');
-            return trackAsync(Promise.resolve(null));
-        }
-
-        const job = file.arrayBuffer()
-            .then((buf) => {
-                if (cancelRequested) return null;
-                return sha256Subtle(buf);
-            })
-            .catch((e) => {
-                console.warn('[UPLOAD] client hash failed', e);
-                return null;
-            });
-
-        return trackAsync(job);
+        setStatus('Fingerprinting (worker stream)...');
+        return await new Promise((resolve, reject) => {
+            const src = `
+                const HASH_SLICE = ${HASH_SLICE};
+                ${createSha256.toString()}
+                self.onmessage = async (ev) => {
+                    try {
+                        const file = ev.data.file;
+                        const hasher = createSha256();
+                        let offset = 0;
+                        const total = file.size;
+                        while (offset < total) {
+                            const end = Math.min(offset + HASH_SLICE, total);
+                            const buf = await file.slice(offset, end).arrayBuffer();
+                            hasher.update(new Uint8Array(buf));
+                            offset = end;
+                            self.postMessage({ type: 'p', pct: total ? Math.floor(offset / total * 100) : 100 });
+                        }
+                        self.postMessage({ type: 'd', hex: hasher.hexDigest() });
+                    } catch (e) {
+                        self.postMessage({ type: 'e', m: e && e.message ? e.message : String(e) });
+                    }
+                };
+            `;
+            let worker;
+            try {
+                worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
+            } catch (e) {
+                reject(e);
+                return;
+            }
+            worker.onmessage = (ev) => {
+                if (ev.data.type === 'p') setProgress(ev.data.pct, 'Hash ' + ev.data.pct + '%');
+                else if (ev.data.type === 'd') { worker.terminate(); resolve(ev.data.hex); }
+                else if (ev.data.type === 'e') { worker.terminate(); reject(new Error(ev.data.m)); }
+            };
+            worker.onerror = (err) => { worker.terminate(); reject(err.error || new Error('hash worker')); };
+            worker.postMessage({ file });
+        });
     }
 
     async function apiInitiate(file, checksum) {
@@ -385,23 +387,10 @@ window.uploaderInit = function (apiBase, apiKey) {
         else if (avg < 4 && adaptiveWorkers > MIN_WORKERS) adaptiveWorkers--;
     }
 
-    /**
-     * Take client checksum only if already finished — never block the complete path.
-     */
-    function takeReadyChecksum(checksumOrPromise) {
-        if (!checksumOrPromise) return null;
-        if (typeof checksumOrPromise.then === 'function' && checksumOrPromise.peek) {
-            const s = checksumOrPromise.peek();
-            if (s.done && s.value) return s.value;
-            return null;
-        }
-        if (typeof checksumOrPromise.then === 'function') return null;
-        return checksumOrPromise || null;
-    }
-
-    async function runUpload(file, uploadId, totalChunks, checksumOrPromise, alreadyReceived) {
+    async function runUpload(file, uploadId, totalChunks, checksum, alreadyReceived) {
         currentFile = file;
         currentUploadId = uploadId;
+        currentChecksum = checksum || null;
         cancelRequested = false;
         pauseRequested = false;
 
@@ -453,10 +442,8 @@ window.uploaderInit = function (apiBase, apiKey) {
         async function workerOne() {
             while (!cancelRequested && !pauseRequested && !fatalError) {
                 if (activeWorkers > adaptiveWorkers) return;
-
                 const item = queue.shift();
                 if (!item) return;
-
                 try {
                     const blob = file.slice(item.start, item.end);
                     await apiUploadChunk(uploadId, item.index, blob);
@@ -487,13 +474,7 @@ window.uploaderInit = function (apiBase, apiKey) {
         }
 
         if (fatalError) throw fatalError;
-
-        if (cancelRequested) {
-            setStatus('Cancelled');
-            setState('idle');
-            return;
-        }
-
+        if (cancelRequested) { setStatus('Cancelled'); setState('idle'); return; }
         if (pauseRequested) {
             setStatus(`Paused — ${uploadedCount}/${totalChunks} chunks`);
             setState('paused');
@@ -501,18 +482,12 @@ window.uploaderInit = function (apiBase, apiKey) {
             return;
         }
 
-        // CRITICAL: do not await client SHA-256 here — that was the multi-minute stall on large files.
         setState('verifying');
         setProgress(99, 'Server merge...');
         setStatus('Server merging & verifying (disk)...');
         setSpeed(null);
 
-        const checksum = takeReadyChecksum(checksumOrPromise);
-        currentChecksum = checksum;
-        if (checksum) console.log('[UPLOAD] client SHA-256 (ready):', checksum);
-        else console.log('[UPLOAD] no client checksum — server will hash on complete');
-
-        const result = await apiComplete(uploadId, checksum);
+        const result = await apiComplete(uploadId, checksum || null);
         clearSession();
         setProgress(100, '100% — done');
         setStatus('Completed: ' + (result.path || file.name));
@@ -529,17 +504,34 @@ window.uploaderInit = function (apiBase, apiKey) {
         }
 
         try {
-            setState('uploading');
+            // 1) Fingerprint for content-addressed dedupe (required to skip re-upload).
+            setState('hashing');
+            const checksum = await computeFullFileSha256(file);
+            if (cancelRequested) { setState('idle'); return; }
+            if (checksum) {
+                currentChecksum = checksum;
+                console.log('[UPLOAD] SHA-256 (dedupe key):', checksum);
+            }
 
-            // Small files: optional WebCrypto hash in parallel (never blocks complete).
-            // Large files: skip client full hash entirely.
-            const hashPromise = startClientFullHash(file);
+            // 2) Initiate — server may return alreadyExists when SHA-256 + size match a Completed object.
+            setStatus('Initiating / checking duplicates...');
+            const init = await apiInitiate(file, checksum);
 
-            setStatus('Initiating...');
-            const init = await apiInitiate(file, null);
+            if (init.alreadyExists) {
+                clearSession();
+                setProgress(100, '100% — exists');
+                setStatus(
+                    'Already on server — uploadId: ' + (init.existingUploadId || init.uploadId) +
+                    (init.path ? ' · ' + init.path : '')
+                );
+                console.log('[UPLOAD] Content dedupe hit', init);
+                setState('done');
+                return;
+            }
+
             requireChunkCrc32 = !!init.requireChunkCrc32;
             requireChunkSha256 = !!init.requireChunkSha256;
-            await runUpload(file, init.uploadId, init.totalChunks, hashPromise, []);
+            await runUpload(file, init.uploadId, init.totalChunks, checksum, []);
         } catch (err) {
             console.error('[UPLOAD]', err);
             showError(err.message || String(err));
@@ -598,13 +590,7 @@ window.uploaderInit = function (apiBase, apiKey) {
                             setState('idle');
                             return;
                         }
-                        await runUpload(
-                            currentFile,
-                            currentUploadId,
-                            st.totalChunks,
-                            currentChecksum,
-                            st.received || []
-                        );
+                        await runUpload(currentFile, currentUploadId, st.totalChunks, currentChecksum, st.received || []);
                     } catch (err) {
                         showError(err.message || String(err));
                         setState('error');
