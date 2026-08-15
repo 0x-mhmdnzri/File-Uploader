@@ -176,6 +176,46 @@ public class InMemoryUploadRepository : IUploadRepository
         }
     }
 
+    public Task<bool> TryClaimExpiredAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            if (!_store.TryGetValue(id, out var current))
+                return Task.FromResult(false);
+
+            var now = DateTime.UtcNow;
+            if (current.Status is not (UploadStatus.Pending or UploadStatus.Completing))
+                return Task.FromResult(false);
+
+            if (current.ExpiresAt > now)
+                return Task.FromResult(false);
+
+            var next = Clone(current);
+            next.Status = UploadStatus.Expired;
+            next.Version = current.Version + 1;
+            _store[id] = next;
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task<bool> TryAbortAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            if (!_store.TryGetValue(id, out var current))
+                return Task.FromResult(false);
+
+            if (current.Status != UploadStatus.Pending)
+                return Task.FromResult(false);
+
+            var next = Clone(current);
+            next.Status = UploadStatus.Aborted;
+            next.Version = current.Version + 1;
+            _store[id] = next;
+            return Task.FromResult(true);
+        }
+    }
+
     private static UploadSession Clone(UploadSession s) => new()
     {
         Id = s.Id,
