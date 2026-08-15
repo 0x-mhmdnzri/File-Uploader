@@ -18,9 +18,12 @@ window.uploaderInit = function (apiBase, apiKey) {
     const MIN_WORKERS = 2;
     const MAX_WORKERS_CAP = 6;
     const STORAGE_KEY = 'fileUploaderSession';
-    // One-shot WebCrypto in memory (hardware AES-NI / ARM crypto when available).
-    const WEBCYPTO_MAX_BYTES = 512 * 1024 * 1024;
-    // Streaming fallback slice size (fewer FileReader round-trips).
+    /**
+     * Full-file client SHA-256 only for files at or below this size (WebCrypto one-shot).
+     * Larger files: skip client digest entirely — SHA-256 is sequential; waiting for it
+     * after a fast 7GB upload causes multi-minute "Verifying..." stalls. Server hashes at complete.
+     */
+    const CLIENT_FULL_HASH_MAX = 512 * 1024 * 1024;
     const HASH_SLICE = 16 * 1024 * 1024;
     const API_KEY = apiKey || '';
     const HAS_SUBTLE = !!(globalThis.crypto && crypto.subtle && crypto.subtle.digest);
@@ -116,13 +119,11 @@ window.uploaderInit = function (apiBase, apiKey) {
         return hex.join('');
     }
 
-    /** Hardware / native SHA-256 (Web Crypto). */
     async function sha256Subtle(data) {
         const dig = await crypto.subtle.digest('SHA-256', data);
         return bufferToHex(dig);
     }
 
-    // ---- Pure-JS SHA-256 (fallback only: stream > WEBCYPTO_MAX or no subtle) ----
     function createSha256() {
         const K = new Uint32Array([
             0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
@@ -229,108 +230,67 @@ window.uploaderInit = function (apiBase, apiKey) {
         return h.hexDigest();
     }
 
-    /**
-     * Fast full-file SHA-256:
-     * 1) WebCrypto one-shot for files <= 512MB (native / hardware).
-     * 2) Off-main-thread streaming worker for larger files (keeps UI + upload free).
-     */
-    function computeSha256Fast(file, onProgress) {
-        if (cancelRequested) return Promise.resolve(null);
-
-        // Path A — hardware Web Crypto on whole buffer
-        if (HAS_SUBTLE && file.size > 0 && file.size <= WEBCYPTO_MAX_BYTES) {
-            if (onProgress) onProgress(0);
-            return file.arrayBuffer().then(async (buf) => {
-                if (cancelRequested) return null;
-                if (onProgress) onProgress(50);
-                const hex = await sha256Subtle(buf);
-                if (onProgress) onProgress(100);
-                return hex;
-            }).catch(() => computeSha256InWorker(file, onProgress));
-        }
-
-        // Path B — worker streaming (does not block upload workers on main thread)
-        return computeSha256InWorker(file, onProgress);
-    }
-
-    function computeSha256InWorker(file, onProgress) {
-        return new Promise((resolve, reject) => {
-            const workerSource = `
-                const HASH_SLICE = ${HASH_SLICE};
-                ${createSha256.toString()}
-                self.onmessage = async (ev) => {
-                    const file = ev.data.file;
-                    try {
-                        const hasher = createSha256();
-                        const total = file.size;
-                        let offset = 0;
-                        let lastPct = -1;
-                        while (offset < total) {
-                            const end = Math.min(offset + HASH_SLICE, total);
-                            const buf = await file.slice(offset, end).arrayBuffer();
-                            hasher.update(new Uint8Array(buf));
-                            offset = end;
-                            const pct = total ? Math.floor((offset / total) * 100) : 100;
-                            if (pct !== lastPct) {
-                                lastPct = pct;
-                                self.postMessage({ type: 'progress', pct });
-                            }
-                        }
-                        self.postMessage({ type: 'done', hex: hasher.hexDigest() });
-                    } catch (e) {
-                        self.postMessage({ type: 'error', message: e && e.message ? e.message : String(e) });
-                    }
-                };
-            `;
-
-            let worker;
-            try {
-                const blob = new Blob([workerSource], { type: 'application/javascript' });
-                worker = new Worker(URL.createObjectURL(blob));
-            } catch (e) {
-                // Worker unavailable — stream on main with large slices, minimal yield
-                streamSha256Main(file, onProgress).then(resolve, reject);
-                return;
+    /** CRC32 lookup table (hash table) — O(1) per byte, used for optional per-chunk checks. */
+    function crc32Hex(u8) {
+        const table = crc32Hex._t || (crc32Hex._t = (function () {
+            const t = new Uint32Array(256);
+            for (let i = 0; i < 256; i++) {
+                let c = i;
+                for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                t[i] = c;
             }
-
-            worker.onmessage = (ev) => {
-                const msg = ev.data;
-                if (msg.type === 'progress') {
-                    if (onProgress) onProgress(msg.pct);
-                } else if (msg.type === 'done') {
-                    worker.terminate();
-                    resolve(msg.hex);
-                } else if (msg.type === 'error') {
-                    worker.terminate();
-                    reject(new Error(msg.message || 'hash worker failed'));
-                }
-            };
-            worker.onerror = (err) => {
-                worker.terminate();
-                reject(err.error || new Error('hash worker error'));
-            };
-
-            worker.postMessage({ file });
-        });
+            return t;
+        })());
+        let crc = 0 ^ (-1);
+        for (let i = 0; i < u8.length; i++) crc = (crc >>> 8) ^ table[(crc ^ u8[i]) & 0xFF];
+        return ((crc ^ (-1)) >>> 0).toString(16).padStart(8, '0');
     }
 
-    async function streamSha256Main(file, onProgress) {
-        const hasher = createSha256();
-        const total = file.size;
-        let offset = 0;
-        let slices = 0;
-        while (offset < total) {
-            if (cancelRequested) return null;
-            const end = Math.min(offset + HASH_SLICE, total);
-            const buf = await file.slice(offset, end).arrayBuffer();
-            hasher.update(new Uint8Array(buf));
-            offset = end;
-            slices++;
-            if (onProgress) onProgress(total ? Math.floor((offset / total) * 100) : 100);
-            // Yield rarely — only every 4 slices (~64MB) so hashing stays hot on CPU
-            if ((slices & 3) === 0) await new Promise(r => setTimeout(r, 0));
+    /**
+     * Settled-aware promise: complete() can read value without awaiting if still running.
+     */
+    function trackAsync(promise) {
+        const state = { done: false, value: null, error: null };
+        const p = Promise.resolve(promise).then(
+            (v) => { state.done = true; state.value = v; return v; },
+            (e) => { state.done = true; state.error = e; return null; }
+        );
+        p.peek = () => state;
+        return p;
+    }
+
+    /**
+     * Client full-file SHA-256 only when cheap (WebCrypto, ≤ CLIENT_FULL_HASH_MAX).
+     * Returns null immediately for large files — server is authoritative.
+     */
+    function startClientFullHash(file) {
+        if (cancelRequested) return trackAsync(Promise.resolve(null));
+        if (!file || file.size <= 0) return trackAsync(Promise.resolve(null));
+
+        if (file.size > CLIENT_FULL_HASH_MAX) {
+            console.log(
+                '[UPLOAD] File > ' + (CLIENT_FULL_HASH_MAX / (1024 * 1024)) +
+                'MB; skipping client-side full SHA-256 (server verifies on complete).'
+            );
+            return trackAsync(Promise.resolve(null));
         }
-        return hasher.hexDigest();
+
+        if (!HAS_SUBTLE) {
+            console.log('[UPLOAD] WebCrypto unavailable; skipping client full hash');
+            return trackAsync(Promise.resolve(null));
+        }
+
+        const job = file.arrayBuffer()
+            .then((buf) => {
+                if (cancelRequested) return null;
+                return sha256Subtle(buf);
+            })
+            .catch((e) => {
+                console.warn('[UPLOAD] client hash failed', e);
+                return null;
+            });
+
+        return trackAsync(job);
     }
 
     async function apiInitiate(file, checksum) {
@@ -349,21 +309,6 @@ window.uploaderInit = function (apiBase, apiKey) {
         const body = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(body.error || ('initiate failed: ' + r.status));
         return body;
-    }
-
-    function crc32Hex(u8) {
-        const table = crc32Hex._t || (crc32Hex._t = (function () {
-            const t = new Uint32Array(256);
-            for (let i = 0; i < 256; i++) {
-                let c = i;
-                for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-                t[i] = c;
-            }
-            return t;
-        })());
-        let crc = 0 ^ (-1);
-        for (let i = 0; i < u8.length; i++) crc = (crc >>> 8) ^ table[(crc ^ u8[i]) & 0xFF];
-        return ((crc ^ (-1)) >>> 0).toString(16).padStart(8, '0');
     }
 
     async function apiUploadChunk(uploadId, index, blob) {
@@ -438,6 +383,20 @@ window.uploaderInit = function (apiBase, apiKey) {
         const avg = recentMbps.reduce((a, b) => a + b, 0) / recentMbps.length;
         if (avg > 20 && adaptiveWorkers < MAX_WORKERS_CAP) adaptiveWorkers++;
         else if (avg < 4 && adaptiveWorkers > MIN_WORKERS) adaptiveWorkers--;
+    }
+
+    /**
+     * Take client checksum only if already finished — never block the complete path.
+     */
+    function takeReadyChecksum(checksumOrPromise) {
+        if (!checksumOrPromise) return null;
+        if (typeof checksumOrPromise.then === 'function' && checksumOrPromise.peek) {
+            const s = checksumOrPromise.peek();
+            if (s.done && s.value) return s.value;
+            return null;
+        }
+        if (typeof checksumOrPromise.then === 'function') return null;
+        return checksumOrPromise || null;
     }
 
     async function runUpload(file, uploadId, totalChunks, checksumOrPromise, alreadyReceived) {
@@ -542,20 +501,16 @@ window.uploaderInit = function (apiBase, apiKey) {
             return;
         }
 
-        // Resolve checksum (may still be hashing in parallel worker / WebCrypto).
+        // CRITICAL: do not await client SHA-256 here — that was the multi-minute stall on large files.
         setState('verifying');
-        setProgress(99, 'Finalizing...');
-        setStatus('Waiting for checksum / verifying...');
+        setProgress(99, 'Server merge...');
+        setStatus('Server merging & verifying (disk)...');
         setSpeed(null);
 
-        let checksum = null;
-        if (checksumOrPromise && typeof checksumOrPromise.then === 'function') {
-            checksum = await checksumOrPromise;
-        } else {
-            checksum = checksumOrPromise || null;
-        }
+        const checksum = takeReadyChecksum(checksumOrPromise);
         currentChecksum = checksum;
-        if (checksum) console.log('[UPLOAD] SHA-256:', checksum);
+        if (checksum) console.log('[UPLOAD] client SHA-256 (ready):', checksum);
+        else console.log('[UPLOAD] no client checksum — server will hash on complete');
 
         const result = await apiComplete(uploadId, checksum);
         clearSession();
@@ -574,24 +529,13 @@ window.uploaderInit = function (apiBase, apiKey) {
         }
 
         try {
-            // Hash runs in parallel with initiate + upload (does not block the pipe).
-            setStatus(HAS_SUBTLE && file.size <= WEBCYPTO_MAX_BYTES
-                ? 'Hashing (WebCrypto / hardware)...'
-                : 'Hashing in background worker...');
             setState('uploading');
 
-            const hashPromise = computeSha256Fast(file, (pct) => {
-                // Soft status only while still early; upload progress owns the bar later.
-                if (state === 'uploading' && uploadedCount === 0) {
-                    setProgress(Math.min(5, Math.floor(pct / 20)), 'Hash ' + pct + '%');
-                }
-            }).catch((e) => {
-                console.warn('[UPLOAD] client hash failed; server will verify', e);
-                return null;
-            });
+            // Small files: optional WebCrypto hash in parallel (never blocks complete).
+            // Large files: skip client full hash entirely.
+            const hashPromise = startClientFullHash(file);
 
             setStatus('Initiating...');
-            // Do not wait for hash — optional checksum can arrive at complete.
             const init = await apiInitiate(file, null);
             requireChunkCrc32 = !!init.requireChunkCrc32;
             requireChunkSha256 = !!init.requireChunkSha256;
