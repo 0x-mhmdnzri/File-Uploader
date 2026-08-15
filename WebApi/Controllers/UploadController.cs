@@ -36,6 +36,7 @@ public class UploadController : ControllerBase
         [FromForm] int chunkSize = 16_777_216,
         [FromForm] string? contentType = null,
         [FromForm] string? checksum = null,
+        [FromForm] string? contentFingerprint = null,
         CancellationToken ct = default)
     {
         try
@@ -43,7 +44,7 @@ public class UploadController : ControllerBase
             var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString();
 
             var result = await _service.InitiateAsync(
-                fileName, totalSize, chunkSize, contentType, checksum, clientIp, ct);
+                fileName, totalSize, chunkSize, contentType, checksum, contentFingerprint, clientIp, ct);
 
             var session = result.Session;
 
@@ -59,6 +60,7 @@ public class UploadController : ControllerBase
                     finalFileName = session.FinalFileName,
                     totalSize = session.TotalSize,
                     checksum = session.Checksum,
+                    contentFingerprint = session.ContentFingerprint,
                     status = session.Status.ToString(),
                     message = "Identical content already stored; no upload required."
                 });
