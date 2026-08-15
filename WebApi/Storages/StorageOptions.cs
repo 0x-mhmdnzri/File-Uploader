@@ -41,8 +41,15 @@ public class StorageOptions
     /// <summary>
     /// When true (default) and client sends SHA-256 at initiate, return existing Completed
     /// session if checksum + size match and the final object still exists on the shared store.
+    /// Also enables sample-fingerprint dedupe for large files.
     /// </summary>
     public bool DeduplicateByContent { get; set; } = true;
+
+    /// <summary>
+    /// Bytes sampled from head and tail for content fingerprint (default 1 MiB each).
+    /// Enables dedupe for multi-GB files without a full client SHA-256.
+    /// </summary>
+    public int ContentSampleBytes { get; set; } = 1 * 1024 * 1024;
 
     public bool RequireChunkCrc32 { get; set; } = false;
     public bool RequireChunkSha256 { get; set; } = false;
