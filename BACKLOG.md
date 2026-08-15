@@ -1,6 +1,6 @@
 # BACKLOG — File Uploader (own file service, S3-inspired)
 
-Last updated: 2026-08-15 (`dev`) — P4.2 D5–D7/D9 done.
+Last updated: 2026-08-15 (`dev`) — P4.3 D10–D12 done.
 
 ---
 
@@ -28,17 +28,21 @@ Last updated: 2026-08-15 (`dev`) — P4.2 D5–D7/D9 done.
 - [x] D9 Merge never assumes node-local-only temp (centralized `PartPath` helpers)
 - [ ] D8 Owned blob nodes design (later)
 
+### P4.3 Thin distributed coordination (D10–D12)
+- [x] D10 Idempotent chunk PUT (`ChunkExists` → 200 without rewrite)
+- [x] D11 CAS abort (`TryAbortAsync` Pending → Aborted)
+- [x] D12 Cluster-safe orphan cleanup (`TryClaimExpiredAsync` + winner deletes parts)
+
 ---
 
 ## P4 remaining — next
 
-### P4.3–P4.5
+### P4.4–P4.5
 | ID | Task |
 |----|------|
-| D10–D12 | Idempotent PUT, cluster-safe cleanup |
-| D13–D15 | LB docs, readiness |
+| D13–D15 | LB docs, readiness probes (shared volume + DB) |
 | D16–D18 | Chaos / happy / double-complete proof |
 
-**Next implement:** D10–D12 (idempotent PUT + cluster-safe cleanup).
+**Next implement:** D13–D15 (LB + readiness).
 
 See `docs/MULTI-INSTANCE.md`.
