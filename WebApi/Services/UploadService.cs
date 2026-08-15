@@ -42,7 +42,7 @@ public class UploadService : IUploadService
         _logger = logger;
     }
 
-    public async Task<UploadSession> InitiateAsync(
+    public async Task<InitiateResult> InitiateAsync(
         string fileName,
         long totalSize,
         int chunkSize,
@@ -63,6 +63,37 @@ public class UploadService : IUploadService
         ValidateFileSize(totalSize);
         ValidateChunkSize(chunkSize);
         ValidateExtension(fileName);
+
+        var normalizedChecksum = NormalizeChecksum(checksum);
+
+        // Content-addressed dedupe: same SHA-256 + size + final object still on shared store.
+        // Works across users and API nodes (metadata in shared DB, bytes on shared volume).
+        if (_options.DeduplicateByContent && normalizedChecksum is not null)
+        {
+            var existing = await _repo.FindCompletedByContentAsync(normalizedChecksum, totalSize, ct);
+            if (existing is not null && !string.IsNullOrWhiteSpace(existing.FinalFileName))
+            {
+                var finalName = existing.FinalFileName!;
+                var stillThere = await _storage.FinalObjectExistsAsync(finalName, totalSize, ct);
+                if (stillThere)
+                {
+                    _logger.LogInformation(
+                        "Content dedupe hit: checksum={Checksum} size={Size} → existing uploadId={UploadId} file={File}",
+                        normalizedChecksum, totalSize, existing.Id, finalName);
+
+                    return new InitiateResult
+                    {
+                        Session = existing,
+                        AlreadyExists = true,
+                        ExistingPath = finalName
+                    };
+                }
+
+                _logger.LogWarning(
+                    "Dedupe metadata hit but final object missing for {UploadId} ({File}); creating new upload",
+                    existing.Id, finalName);
+            }
+        }
 
         if (!string.IsNullOrWhiteSpace(clientIp) && _options.MaxPendingSessionsPerIp > 0)
         {
@@ -90,7 +121,7 @@ public class UploadService : IUploadService
             CreatedAt = DateTime.UtcNow,
             ExpiresAt = DateTime.UtcNow.AddHours(_options.PendingTtlHours),
             ContentType = contentType,
-            Checksum = NormalizeChecksum(checksum),
+            Checksum = normalizedChecksum,
             ClientIp = clientIp
         };
 
@@ -105,7 +136,11 @@ public class UploadService : IUploadService
             "Upload initiated {UploadId} for {FileName} ({TotalSize} bytes, {TotalChunks} chunks, ip={ClientIp})",
             session.Id, session.FileName, session.TotalSize, session.TotalChunks, clientIp ?? "-");
 
-        return session;
+        return new InitiateResult
+        {
+            Session = session,
+            AlreadyExists = false
+        };
     }
 
     public async Task EnsureCanAcceptChunkAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default)
@@ -154,7 +189,6 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
-        // Distributed safety: only one node wins Pending → Completing.
         var won = await _repo.TryBeginCompleteAsync(uploadId, ct);
         if (!won)
         {
@@ -171,7 +205,6 @@ public class UploadService : IUploadService
         session = await _repo.GetAsync(uploadId, ct)
                   ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
 
-        // Disk is truth for parts (multi-node safe).
         var (missing, bytesOnDisk) = await _storage.VerifyChunksParallelAsync(
             uploadId, session.TotalChunks, ct);
 
@@ -194,9 +227,6 @@ public class UploadService : IUploadService
         }
 
         var expectedChecksum = NormalizeChecksum(checksum) ?? session.Checksum;
-
-        // Integrity: always hash on complete by default (shared store / multi-instance).
-        // Client checksum is optional cross-check; absence must NOT skip server digest.
         var computeHash = _options.AlwaysComputeFullChecksum || expectedChecksum is not null;
 
         string finalPath;
