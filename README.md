@@ -5,10 +5,11 @@
 [![.NET](https://img.shields.io/badge/.NET-9-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Architecture](https://img.shields.io/badge/architecture-hexagonal-0ea5e9)](#architecture)
 [![Multi-instance](https://img.shields.io/badge/multi--instance-CAS%20%2B%20shared%20store-16a34a)](#multi-instance-p4)
+[![Client](https://img.shields.io/badge/client-WebCrypto%20%2B%20Worker-f59e0b)](#client-performance)
 [![Proofs](https://img.shields.io/badge/proofs-unit%20%2B%20HTTP%20%2B%20CI-8b5cf6)](#proofs--quality)
 [![Branch](https://img.shields.io/badge/branch-dev-blue)](https://github.com/0x-mhmdnzri/File-Uploader/tree/dev)
 
-> Upload **5 GB – 20 GB+** with chunked parallel transfers, disk-as-truth verification, pre-allocated merge, and **Postgres CAS** so any healthy node can finish the job — **no sticky load balancer required**.
+> Upload **5 GB – 20 GB+** with chunked parallel transfers, **hardware WebCrypto hashing that does not block upload**, disk-as-truth verification, pre-allocated merge, and **Postgres CAS** so any healthy node can finish the job — **no sticky load balancer required**.
 
 ---
 
@@ -17,7 +18,8 @@
 - [Why this project](#why-this-project)
 - [Feature matrix](#feature-matrix)
 - [Architecture](#architecture)
-- [Performance engine](#performance-engine)
+- [Performance engine (server)](#performance-engine-server)
+- [Client performance](#client-performance)
 - [Multi-instance (P4)](#multi-instance-p4)
 - [API surface](#api-surface)
 - [Security, quotas & observability](#security-quotas--observability)
@@ -38,6 +40,7 @@ Most “chunked upload” demos break under real conditions:
 |------|---------------------|
 | Lost chunk marks under concurrency | **Disk is source of truth**; in-memory is only a hint |
 | Merge serializes on a global lock | **Pre-allocate + parallel offset writes** |
+| Client hash blocks the whole start | **WebCrypto / Worker hash in parallel with upload** |
 | “HA” = sticky LB | **Shared metadata + shared parts + CAS** |
 | In-process locks as “distributed” | Explicit **non-goals** + fail-fast startup guard |
 | Complete race across nodes | `Pending → Completing → Completed/Failed` **CAS** |
@@ -52,13 +55,15 @@ This is an **owned file service** (product plane = your volume / future blob nod
 
 | Feature | Status | Notes |
 |---------|--------|--------|
-| Chunked upload (configurable size, default 16 MB) | ✅ | Client + server aligned |
-| Parallel workers (browser) | ✅ | Adaptive concurrency |
+| Chunked upload (default **16 MB**) | ✅ | Client + server aligned |
+| Parallel workers (browser) | ✅ | Adaptive 2–6 from throughput |
 | Resume / status from disk listing | ✅ | `GET /status` → `received[]` |
 | Idempotent chunk PUT | ✅ | `{ idempotent: true }` if part exists |
 | Optional Content-Encoding (`gzip` / `deflate` / `br`) | ✅ | Per-chunk decompress on server |
-| Optional per-chunk CRC32 / SHA-256 | ✅ | Headers `X-Chunk-CRC32`, `X-Chunk-SHA256` |
-| Full-file SHA-256 on complete | ✅ | Single-pass or parallel-then-hash |
+| Optional per-chunk CRC32 / SHA-256 | ✅ | Headers; chunk SHA via **WebCrypto** when available |
+| Full-file SHA-256 (client) | ✅ | WebCrypto ≤512MB · Worker stream above |
+| Hash **parallel to upload** | ✅ | Initiate/upload do not wait for client hash |
+| Full-file SHA-256 on complete (server) | ✅ | Single-pass or parallel-then-hash |
 | Pre-allocated parallel merge | ✅ | Non-overlapping offsets |
 | Orphan / TTL cleanup | ✅ | Cluster-safe CAS claim |
 | Abort | ✅ | CAS `Pending → Aborted` |
@@ -78,8 +83,9 @@ This is an **owned file service** (product plane = your volume / future blob nod
 | Unit + HTTP + two-node CI proofs | ✅ | [docs/PROOFS.md](docs/PROOFS.md) |
 | Owned blob nodes design | ✅ design | [docs/OWNED-BLOB-NODES.md](docs/OWNED-BLOB-NODES.md) |
 | EF migrations (not EnsureCreated) | ✅ | [docs/MIGRATIONS.md](docs/MIGRATIONS.md) |
+| DB bootstrap + schema safety net | ✅ | Migrate + EnsureCreated fallback |
 
-### Platform
+### Platform & DX
 
 | Feature | Status |
 |---------|--------|
@@ -91,8 +97,10 @@ This is an **owned file service** (product plane = your volume / future blob nod
 | Serilog + audit log | ✅ |
 | Metrics snapshot | ✅ |
 | Domain events (log / webhook / RabbitMQ) | ✅ |
-| Hardware or CPU SHA-256 hasher | ✅ |
+| Hardware or CPU SHA-256 hasher (server) | ✅ |
 | Storage micro-bench tool | ✅ |
+| Dev CORS: any `localhost` / `127.0.0.1` origin | ✅ |
+| WebApp `ApiBase` → `http://localhost:5073` | ✅ |
 
 ---
 
@@ -102,6 +110,8 @@ This is an **owned file service** (product plane = your volume / future blob nod
 flowchart TB
   subgraph Clients
     Browser[Browser / SDK]
+    Hash[WebCrypto or Worker hash]
+    Up[Parallel chunk PUT]
   end
 
   subgraph Edge
@@ -118,7 +128,10 @@ flowchart TB
     VOL[Shared volume<br/>parts + finals]
   end
 
-  Browser --> LB
+  Browser --> Hash
+  Browser --> Up
+  Hash -.->|checksum at complete| Up
+  Up --> LB
   LB --> A1
   LB --> A2
   A1 --> PG
@@ -147,7 +160,7 @@ flowchart TB
 
 ---
 
-## Performance engine
+## Performance engine (server)
 
 ### Results (indicative)
 
@@ -198,6 +211,60 @@ sequenceDiagram
 
 ---
 
+## Client performance
+
+Browser uploader (`WebApp/wwwroot/js/upload.js`) is tuned so **checksum work does not sit on the critical path** of starting the transfer.
+
+### Hash strategy
+
+| File size | Path | Why |
+|-----------|------|-----|
+| **≤ 512 MB** | **`crypto.subtle.digest('SHA-256')`** one-shot | Native / **hardware-backed** on modern CPUs (AES-NI, ARM crypto extensions where the browser exposes them) |
+| **> 512 MB** | **Web Worker** + 16 MB streaming slices | Keeps the **main thread free** for UI + parallel PUT workers |
+| Worker unavailable | Main-thread stream, yield only every ~64 MB | Still far fewer yields than the old 2 MB + `setTimeout` loop |
+
+Per-chunk SHA (when the server requires `X-Chunk-SHA256`) also prefers **WebCrypto** over pure JS.
+
+### Parallel with upload (biggest UX win)
+
+```mermaid
+sequenceDiagram
+  participant UI as Browser
+  participant H as Hash path<br/>WebCrypto / Worker
+  participant API as WebApi
+
+  UI->>H: start hash (async)
+  UI->>API: POST /initiate (no wait for hash)
+  par Upload
+    UI->>API: PUT chunks (N workers)
+  and Hash
+    H-->>UI: hex when ready
+  end
+  UI->>API: POST /complete (+ checksum if ready)
+```
+
+1. Hash starts immediately in the background.  
+2. **`initiate` and chunk PUTs run without waiting** for the full-file digest.  
+3. Before **`complete`**, the client awaits the hash promise (if still running) and sends the checksum when available.  
+4. If client hash fails, upload can still finish; **server-side hash** remains authoritative at complete.
+
+### Upload workers
+
+- Default chunk size **16 MB** → fewer HTTP round-trips.  
+- **2–6 concurrent workers**, adapted from measured MB/s.  
+- Pause / resume / cancel with session resume via `localStorage` + `GET /status`.
+
+### Dev wiring
+
+| Setting | Value |
+|---------|--------|
+| WebApp `ApiBase` | `http://localhost:5073` |
+| WebApi CORS (Development) | Any origin on `localhost` / `127.0.0.1` |
+| WebApi HTTP profile | `http://localhost:5073` |
+| WebApp HTTP profile | `http://localhost:5074` |
+
+---
+
 ## Multi-instance (P4)
 
 ### Non-goals (enforced when `MultiInstance:Enabled=true`)
@@ -242,10 +309,11 @@ Details: [docs/MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md) · [docs/PROXY.md](doc
 
 ### Client contract (short)
 
-1. Any healthy node may handle any step for an `uploadId`.
-2. Retry chunk PUT on 502/503/timeout.
-3. Rebuild progress from `GET /status` after reconnect.
-4. On complete CAS conflict, poll status until terminal.
+1. Any healthy node may handle any step for an `uploadId`.  
+2. Retry chunk PUT on 502/503/timeout.  
+3. Rebuild progress from `GET /status` after reconnect.  
+4. On complete CAS conflict, poll status until terminal.  
+5. Client full-file checksum is **optional** at initiate; preferred at complete when the parallel hash finishes.
 
 ---
 
@@ -268,13 +336,15 @@ cd File-Uploader
 git checkout dev
 
 # API (Sqlite lab — MultiInstance left false)
-dotnet run --project WebApi
+dotnet run --project WebApi --launch-profile http
 
 # UI (other terminal)
-dotnet run --project WebApp
+dotnet run --project WebApp --launch-profile http
 ```
 
-> **Note:** Boot applies **EF migrations**. If you still have an old `uploads.db` from `EnsureCreated`, delete it once or follow [docs/MIGRATIONS.md](docs/MIGRATIONS.md).
+Open **http://localhost:5074** — the page talks to **http://localhost:5073**.
+
+> **Note:** Boot applies **EF migrations** (with schema safety net). If you still have a broken lab `uploads.db`, delete it once or follow [docs/MIGRATIONS.md](docs/MIGRATIONS.md).
 
 ### Unit proofs (no server)
 
@@ -361,6 +431,15 @@ Key sections in `WebApi/appsettings.json`:
 }
 ```
 
+WebApp (`WebApp/appsettings.json`):
+
+```json
+{
+  "ApiBase": "http://localhost:5073",
+  "ApiKey": ""
+}
+```
+
 **Multi-node minimum:** `Database:Provider=Postgres`, shared `TempPath`/`FinalPath`, `MultiInstance:Enabled=true`, `SharedPartStoreConfigured=true`.
 
 More: [docs/CONFIG.md](docs/CONFIG.md)
@@ -388,8 +467,9 @@ More: [docs/CONFIG.md](docs/CONFIG.md)
 1. **Disk is truth** for parts; metadata CAS is truth for session state.  
 2. **Bound concurrency** — parallelism without an IO gate is a latency regression.  
 3. **No sticky LB for correctness** — shared store + CAS instead.  
-4. **Fail fast at boot** when multi-instance is claimed without prerequisites.  
-5. **Prove it** — unit CAS, HTTP scripts, two-node compose, CI.
+4. **Client hash must not block the upload pipe** — WebCrypto / Worker + await only at complete.  
+5. **Fail fast at boot** when multi-instance is claimed without prerequisites.  
+6. **Prove it** — unit CAS, HTTP scripts, two-node compose, CI.
 
 ---
 
@@ -398,7 +478,7 @@ More: [docs/CONFIG.md](docs/CONFIG.md)
 | Item | Status |
 |------|--------|
 | Blob node **implementation** (from D8 design) | Future |
-| Adaptive client concurrency from RTT/throughput | Future |
+| WASM hash (e.g. hash-wasm) for multi-GB streaming | Optional |
 | Provider-split EF migrations if SQL diverges | Only if needed |
 
 ---
@@ -407,5 +487,5 @@ More: [docs/CONFIG.md](docs/CONFIG.md)
 **.NET 9 · high-throughput IO · concurrency-conscious · multi-instance file pipelines**
 
 ```bash
-git checkout dev && dotnet run --project WebApi
+git checkout dev && dotnet run --project WebApi --launch-profile http
 ```
