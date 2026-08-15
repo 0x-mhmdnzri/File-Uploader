@@ -178,15 +178,49 @@ Stuck `Completing` past `ExpiresAt` is claimable so a dead merger cannot leave p
 
 ---
 
+## P4.4 — Load balancer & client contract
+
+### D13 — LB policy
+
+- Route to any instance that passes readiness.
+- **Do not** require cookie/IP affinity for correctness.
+- Prefer `least_conn` or round-robin over sticky.
+
+Details and nginx/Caddy/k8s samples: [PROXY.md](./PROXY.md).
+
+### D14 — Probes
+
+| Endpoint | Meaning |
+|----------|--------|
+| `GET /health/live` | Process alive (`self`) |
+| `GET /health/ready` | **Postgres** reachable + **TempPath/FinalPath** writable |
+| `GET /health` | Aggregate |
+
+Ready → **503** removes the node from the pool when the shared volume or DB is broken on that host.
+
+### D15 — Client contract
+
+Full rules: [CLIENT-CONTRACT.md](./CLIENT-CONTRACT.md).
+
+Summary:
+
+- Retry chunk PUT on 502/503/timeout (idempotent).
+- Rebuild progress from `GET /status` (`received` from disk).
+- On complete CAS conflict, poll status until terminal.
+- Never assume the same backend for initiate → chunks → complete.
+
+---
+
 ## Minimal multi-node checklist
 
 1. Postgres for sessions (D1–D4).
 2. Shared volume mounted at the same `TempPath` / `FinalPath` on every API node (D6).
 3. `MultiInstance:Enabled=true` and `SharedPartStoreConfigured=true`.
 4. `StorageOptions:Provider=FileSystem`.
-5. Load balancer **without** session affinity requirement (NG2).
+5. Load balancer health = **`/health/ready`**, no sticky required (P4.4 / NG2).
 6. Wipe old temp folders after the D5 layout change.
 7. Rely on CAS + idempotent PUT (P4.3) — not in-process locks alone (NG1).
+8. Clients follow [CLIENT-CONTRACT.md](./CLIENT-CONTRACT.md).
 
 ### Ops note
 
