@@ -6,7 +6,9 @@ using WebApi.Storages;
 namespace WebApi.BackgroundServices;
 
 /// <summary>
-/// Periodically removes expired Pending uploads (orphans) from both database and disk.
+/// Periodically removes expired Pending/Completing uploads from shared storage + metadata.
+/// P4.3: only the node that wins <see cref="IUploadRepository.TryClaimExpiredAsync"/> deletes parts
+/// (thin distributed coordination — no Redis/etcd lock service).
 /// </summary>
 public class OrphanCleanupService : BackgroundService
 {
@@ -32,7 +34,6 @@ public class OrphanCleanupService : BackgroundService
             "OrphanCleanupService started. Interval={Interval}, PendingTtlHours={Ttl}",
             interval, _options.PendingTtlHours);
 
-        // Small delay on startup so the app can finish booting
         await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -56,30 +57,43 @@ public class OrphanCleanupService : BackgroundService
         var repo = scope.ServiceProvider.GetRequiredService<IUploadRepository>();
         var storage = scope.ServiceProvider.GetRequiredService<IFileStorage>();
 
-        var expired = await repo.GetExpiredPendingAsync(ct);
+        var candidates = await repo.GetExpiredPendingAsync(ct);
 
-        if (expired.Count == 0)
+        if (candidates.Count == 0)
         {
             _logger.LogDebug("Orphan cleanup: no expired sessions found");
             return;
         }
 
-        _logger.LogInformation("Orphan cleanup: found {Count} expired pending sessions", expired.Count);
+        _logger.LogInformation(
+            "Orphan cleanup: {Count} expired candidate(s); claiming via CAS", candidates.Count);
 
-        foreach (var session in expired)
+        var claimed = 0;
+        var skipped = 0;
+
+        foreach (var session in candidates)
         {
             try
             {
+                // Thin distributed lock: only one node transitions to Expired.
+                var won = await repo.TryClaimExpiredAsync(session.Id, ct);
+                if (!won)
+                {
+                    skipped++;
+                    _logger.LogDebug(
+                        "Orphan cleanup: skip {UploadId} (another node claimed or already terminal)",
+                        session.Id);
+                    continue;
+                }
+
+                claimed++;
+
+                // Winner deletes shared part folder (safe on shared volume).
                 await storage.DeleteTempFolderAsync(session.Id, ct);
 
-                session.Status = UploadStatus.Expired;
-                await repo.UpdateAsync(session, ct);
-
-                // Optionally hard-delete the record after marking Expired
-                // await repo.DeleteAsync(session, ct);
-
                 _logger.LogInformation(
-                    "Cleaned orphan upload {UploadId} ({FileName})", session.Id, session.FileName);
+                    "Cleaned orphan upload {UploadId} ({FileName}, was {Status})",
+                    session.Id, session.FileName, session.Status);
             }
             catch (Exception ex)
             {
@@ -87,5 +101,8 @@ public class OrphanCleanupService : BackgroundService
                     "Failed to clean orphan upload {UploadId}", session.Id);
             }
         }
+
+        _logger.LogInformation(
+            "Orphan cleanup cycle done: claimed={Claimed}, skipped={Skipped}", claimed, skipped);
     }
 }
