@@ -12,13 +12,6 @@ using WebApi.Interfaces;
 
 namespace WebApi.Storages;
 
-/// <summary>
-/// S3-compatible IFileStorage (AWS S3, MinIO, Cloudflare R2).
-/// Parts (P4.2 D5): <c>{TempPrefix}{uploadId}/part/{index}</c>
-/// Final: <c>{FinalPrefix}{fileName}</c>
-/// Merge streams parts into a final PutObject (portable; not server-side compose).
-/// Experimental only under MultiInstance (NG3) — product plane is shared FS / owned blob.
-/// </summary>
 public sealed class S3FileStorage : IFileStorage, IDisposable
 {
     private readonly ObjectStorageOptions _options;
@@ -64,7 +57,6 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
         _s3.Dispose();
     }
 
-    // P4.2 D5 — stable part key: {TempPrefix}{uploadId}/part/{index}
     private string PartKey(Guid uploadId, int index) =>
         $"{_options.TempPrefix.TrimEnd('/')}/{uploadId:N}/part/{index}";
 
@@ -115,6 +107,7 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
         int totalChunks,
         long totalSize,
         int chunkSize,
+        bool computeHash = true,
         CancellationToken ct = default)
     {
         var safeName = Path.GetFileName(fileName);
@@ -135,7 +128,7 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
                              FileOptions.Asynchronous | FileOptions.SequentialScan))
             {
                 local.SetLength(totalSize);
-                using var sha = SHA256.Create();
+                using var sha = computeHash ? SHA256.Create() : null;
                 var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
                 try
                 {
@@ -154,7 +147,7 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
                                    .ConfigureAwait(false)) > 0)
                         {
                             await local.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
-                            sha.TransformBlock(buffer, 0, read, null, 0);
+                            sha?.TransformBlock(buffer, 0, read, null, 0);
                             written += read;
                         }
                     }
@@ -164,8 +157,12 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
                         throw new InvalidOperationException(
                             $"S3 merge size mismatch. Expected {totalSize}, wrote {written}.");
 
-                    sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-                    var hex = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
+                    string hex = string.Empty;
+                    if (sha is not null)
+                    {
+                        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                        hex = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
+                    }
 
                     local.Position = 0;
                     var put = new PutObjectRequest
