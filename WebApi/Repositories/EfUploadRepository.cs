@@ -28,7 +28,6 @@ public class EfUploadRepository : IUploadRepository
 
     public async Task UpdateAsync(UploadSession session, CancellationToken ct = default)
     {
-        // Load tracked entity to apply optimistic concurrency on Version.
         var tracked = await _db.UploadSessions.FirstOrDefaultAsync(x => x.Id == session.Id, ct)
                       ?? throw new InvalidOperationException($"Session {session.Id} not found");
 
@@ -117,7 +116,6 @@ public class EfUploadRepository : IUploadRepository
 
     public async Task<bool> TryBeginCompleteAsync(Guid id, CancellationToken ct = default)
     {
-        // Atomic CAS in the database: only one node wins Pending → Completing.
         var rows = await _db.UploadSessions
             .Where(x => x.Id == id && x.Status == UploadStatus.Pending)
             .ExecuteUpdateAsync(s => s
@@ -155,6 +153,34 @@ public class EfUploadRepository : IUploadRepository
             .ExecuteUpdateAsync(s => s
                     .SetProperty(x => x.Status, UploadStatus.Failed)
                     .SetProperty(x => x.Checksum, checksum)
+                    .SetProperty(x => x.Version, x => x.Version + 1),
+                ct);
+
+        return rows == 1;
+    }
+
+    public async Task<bool> TryClaimExpiredAsync(Guid id, CancellationToken ct = default)
+    {
+        // Thin distributed lock via DB CAS: only one node claims the cleanup lease.
+        var now = DateTime.UtcNow;
+        var rows = await _db.UploadSessions
+            .Where(x => x.Id == id
+                        && (x.Status == UploadStatus.Pending || x.Status == UploadStatus.Completing)
+                        && x.ExpiresAt <= now)
+            .ExecuteUpdateAsync(s => s
+                    .SetProperty(x => x.Status, UploadStatus.Expired)
+                    .SetProperty(x => x.Version, x => x.Version + 1),
+                ct);
+
+        return rows == 1;
+    }
+
+    public async Task<bool> TryAbortAsync(Guid id, CancellationToken ct = default)
+    {
+        var rows = await _db.UploadSessions
+            .Where(x => x.Id == id && x.Status == UploadStatus.Pending)
+            .ExecuteUpdateAsync(s => s
+                    .SetProperty(x => x.Status, UploadStatus.Aborted)
                     .SetProperty(x => x.Version, x => x.Version + 1),
                 ct);
 
