@@ -64,16 +64,25 @@ try
                            ?? "Data Source=uploads.db";
 
     var dbProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
+    var migrationsAssembly = typeof(AppDbContext).Assembly.FullName;
+
+    // Resolve relative Sqlite paths against content root (stable under Rider/dotnet run).
+    if (!string.Equals(dbProvider, "Postgres", StringComparison.OrdinalIgnoreCase) &&
+        !string.Equals(dbProvider, "PostgreSQL", StringComparison.OrdinalIgnoreCase))
+    {
+        connectionString = ResolveSqliteConnectionString(connectionString, builder.Environment.ContentRootPath);
+    }
+
     builder.Services.AddDbContext<AppDbContext>(options =>
     {
         if (string.Equals(dbProvider, "Postgres", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(dbProvider, "PostgreSQL", StringComparison.OrdinalIgnoreCase))
         {
-            options.UseNpgsql(connectionString);
+            options.UseNpgsql(connectionString, npgsql => npgsql.MigrationsAssembly(migrationsAssembly));
         }
         else
         {
-            options.UseSqlite(connectionString);
+            options.UseSqlite(connectionString, sqlite => sqlite.MigrationsAssembly(migrationsAssembly));
         }
     });
 
@@ -152,24 +161,12 @@ try
         MultiInstanceStartupGuard.ValidateOrThrow(mi, storage, dbProvider, guardLogger);
     }
 
-    // EF migrations (replaces EnsureCreated) — applies pending migrations on boot.
     using (var scope = app.Services.CreateScope())
     {
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var migrateLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>()
             .CreateLogger("Database");
-        try
-        {
-            await db.Database.MigrateAsync();
-            migrateLogger.LogInformation("Database migrations applied (Provider={Provider})", dbProvider);
-        }
-        catch (Exception ex)
-        {
-            // Lab DBs created with EnsureCreated have no __EFMigrationsHistory — wipe or baseline.
-            migrateLogger.LogError(ex,
-                "MigrateAsync failed. If upgrading from EnsureCreated, delete the lab DB file or baseline migrations.");
-            throw;
-        }
+        await DatabaseBootstrap.EnsureSchemaAsync(db, migrateLogger);
     }
 
     app.UseSerilogRequestLogging(opts =>
@@ -238,4 +235,27 @@ catch (Exception ex)
 finally
 {
     Log.CloseAndFlush();
+}
+
+static string ResolveSqliteConnectionString(string connectionString, string contentRoot)
+{
+    const string prefix = "Data Source=";
+    var idx = connectionString.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+    if (idx < 0)
+        return connectionString;
+
+    var start = idx + prefix.Length;
+    var end = connectionString.IndexOf(';', start);
+    var path = end < 0 ? connectionString[start..] : connectionString[start..end];
+    path = path.Trim().Trim('"');
+
+    if (Path.IsPathRooted(path))
+        return connectionString;
+
+    var full = Path.GetFullPath(Path.Combine(contentRoot, path));
+    var replaced = prefix + full;
+    if (end >= 0)
+        replaced += connectionString[end..];
+
+    return replaced;
 }
