@@ -29,6 +29,12 @@ public class UploadSession
 
     public string? Checksum { get; set; }
 
+    /// <summary>
+    /// Sample-based content fingerprint (head+tail+size SHA-256) for large-file dedupe
+    /// when a full-file client hash is not available.
+    /// </summary>
+    public string? ContentFingerprint { get; set; }
+
     public string? ContentType { get; set; }
 
     public string? ClientIp { get; set; }
