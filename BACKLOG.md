@@ -1,6 +1,6 @@
 # BACKLOG — File Uploader (own file service, S3-inspired)
 
-Last updated: 2026-08-15 (`dev`) — **P4 complete** (P4.0–P4.5).
+Last updated: 2026-08-15 (`dev`) — **P4 complete** + **optional items complete**.
 
 ---
 
@@ -26,32 +26,34 @@ Last updated: 2026-08-15 (`dev`) — **P4 complete** (P4.0–P4.5).
 - [x] D6 Shared filesystem volume gate + boot log of resolved TempPath/FinalPath
 - [x] D7 Shared-FS failure modes documented in `docs/MULTI-INSTANCE.md`
 - [x] D9 Merge never assumes node-local-only temp (centralized `PartPath` helpers)
-- [ ] D8 Owned blob nodes design (later)
+- [x] D8 Owned blob nodes **design** (`docs/OWNED-BLOB-NODES.md`)
 
 ### P4.3 Thin distributed coordination (D10–D12)
-- [x] D10 Idempotent chunk PUT (`ChunkExists` → 200 without rewrite)
-- [x] D11 CAS abort (`TryAbortAsync` Pending → Aborted)
-- [x] D12 Cluster-safe orphan cleanup (`TryClaimExpiredAsync` + winner deletes parts)
+- [x] D10 Idempotent chunk PUT
+- [x] D11 CAS abort
+- [x] D12 Cluster-safe orphan cleanup
 
 ### P4.4 Load balancer & client contract (D13–D15)
-- [x] D13 LB policy documented (no sticky required; ready-based pool)
-- [x] D14 `/health/live` + `/health/ready` (DB + storage tags)
-- [x] D15 Client contract (`docs/CLIENT-CONTRACT.md`) + `docs/PROXY.md` updates
+- [x] D13 LB policy documented
+- [x] D14 `/health/live` + `/health/ready`
+- [x] D15 Client contract + PROXY docs
 
 ### P4.5 Proof tests (D16–D18)
-- [x] D16 Happy-path unit + HTTP proof
-- [x] D17 Double-complete CAS unit + parallel HTTP complete
-- [x] D18 Chaos: parallel claim-expired / abort + manual multi-node checklist
-- [x] `tests/WebApi.Tests`, `tools/proofs/http-proofs.sh`, `docs/PROOFS.md`
+- [x] D16–D18 unit + HTTP proofs
+- [x] Two-process docker compose + GitHub Actions CI
+
+### Optional (completed)
+- [x] EF migrations instead of EnsureCreated (`docs/MIGRATIONS.md`)
+- [x] Expand HTTP proofs to true two-process CI (`.github/workflows/proofs.yml`)
+- [x] D8 owned blob nodes design
 
 ---
 
-## Later (optional)
+## Future (not scheduled)
 
-| ID | Task |
-|----|------|
-| D8 | Owned blob nodes design |
-| — | EF migrations instead of EnsureCreated |
-| — | Expand HTTP proofs to true two-process CI |
+| Item | Notes |
+|------|--------|
+| Blob node **implementation** | Follow `docs/OWNED-BLOB-NODES.md` when shared FS is no longer enough |
+| Provider-split migrations | Only if Sqlite/Postgres SQL diverges heavily |
 
-See `docs/PROOFS.md`, `docs/MULTI-INSTANCE.md`.
+Primary docs: `docs/MULTI-INSTANCE.md`, `docs/PROOFS.md`, `docs/OWNED-BLOB-NODES.md`, `docs/MIGRATIONS.md`.
