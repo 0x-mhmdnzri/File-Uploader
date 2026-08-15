@@ -36,4 +36,16 @@ public interface IUploadRepository
     /// CAS: Completing → Failed.
     /// </summary>
     Task<bool> TryFailCompleteAsync(Guid id, string? checksum, CancellationToken ct = default);
+
+    /// <summary>
+    /// P4.3 thin distributed coordination: claim an expired session for cleanup.
+    /// CAS: (Pending|Completing) + ExpiresAt <= now → Expired.
+    /// Only the winning node may delete shared part files for this session.
+    /// </summary>
+    Task<bool> TryClaimExpiredAsync(Guid id, CancellationToken ct = default);
+
+    /// <summary>
+    /// CAS: Pending → Aborted (refuse if Completing/terminal).
+    /// </summary>
+    Task<bool> TryAbortAsync(Guid id, CancellationToken ct = default);
 }
