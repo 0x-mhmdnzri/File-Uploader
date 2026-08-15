@@ -11,6 +11,15 @@ public interface IUploadRepository
 
     Task<IReadOnlyList<UploadSession>> GetExpiredPendingAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// Content-addressed lookup: Completed session with same SHA-256 and total size (newest first).
+    /// Shared across nodes via Postgres/Sqlite — works regardless of which node originally uploaded.
+    /// </summary>
+    Task<UploadSession?> FindCompletedByContentAsync(
+        string checksumSha256Hex,
+        long totalSize,
+        CancellationToken ct = default);
+
     Task<int> CountActivePendingByIpAsync(string clientIp, CancellationToken ct = default);
 
     Task<long> SumCompletedBytesAsync(CancellationToken ct = default);
@@ -18,34 +27,17 @@ public interface IUploadRepository
     Task<long> SumActivePendingBytesAsync(CancellationToken ct = default);
     Task<long> SumActivePendingBytesByIpAsync(string clientIp, CancellationToken ct = default);
 
-    /// <summary>
-    /// CAS: Pending → Completing. Returns true if this caller won the merge lease.
-    /// </summary>
     Task<bool> TryBeginCompleteAsync(Guid id, CancellationToken ct = default);
 
-    /// <summary>
-    /// CAS: Completing → Completed (with final metadata).
-    /// </summary>
     Task<bool> TryFinishCompleteAsync(
         Guid id,
         string finalFileName,
         string? checksum,
         CancellationToken ct = default);
 
-    /// <summary>
-    /// CAS: Completing → Failed.
-    /// </summary>
     Task<bool> TryFailCompleteAsync(Guid id, string? checksum, CancellationToken ct = default);
 
-    /// <summary>
-    /// P4.3 thin distributed coordination: claim an expired session for cleanup.
-    /// CAS: (Pending|Completing) + ExpiresAt <= now → Expired.
-    /// Only the winning node may delete shared part files for this session.
-    /// </summary>
     Task<bool> TryClaimExpiredAsync(Guid id, CancellationToken ct = default);
 
-    /// <summary>
-    /// CAS: Pending → Aborted (refuse if Completing/terminal).
-    /// </summary>
     Task<bool> TryAbortAsync(Guid id, CancellationToken ct = default);
 }
