@@ -154,6 +154,7 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
+        // Distributed safety: only one node wins Pending → Completing.
         var won = await _repo.TryBeginCompleteAsync(uploadId, ct);
         if (!won)
         {
@@ -170,6 +171,7 @@ public class UploadService : IUploadService
         session = await _repo.GetAsync(uploadId, ct)
                   ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
 
+        // Disk is truth for parts (multi-node safe).
         var (missing, bytesOnDisk) = await _storage.VerifyChunksParallelAsync(
             uploadId, session.TotalChunks, ct);
 
@@ -192,8 +194,10 @@ public class UploadService : IUploadService
         }
 
         var expectedChecksum = NormalizeChecksum(checksum) ?? session.Checksum;
-        // Full-file SHA of multi-GB is the dominant complete cost — only when a client/session expects it.
-        var computeHash = expectedChecksum is not null;
+
+        // Integrity: always hash on complete by default (shared store / multi-instance).
+        // Client checksum is optional cross-check; absence must NOT skip server digest.
+        var computeHash = _options.AlwaysComputeFullChecksum || expectedChecksum is not null;
 
         string finalPath;
         string actualChecksum;
@@ -221,6 +225,7 @@ public class UploadService : IUploadService
         }
 
         if (expectedChecksum is not null &&
+            !string.IsNullOrEmpty(actualChecksum) &&
             !string.Equals(actualChecksum, expectedChecksum, StringComparison.OrdinalIgnoreCase))
         {
             _logger.LogWarning(
@@ -240,7 +245,10 @@ public class UploadService : IUploadService
         }
 
         var finalName = Path.GetFileName(finalPath);
-        var checksumToStore = string.IsNullOrEmpty(actualChecksum) ? expectedChecksum : actualChecksum;
+        var checksumToStore = !string.IsNullOrEmpty(actualChecksum)
+            ? actualChecksum
+            : expectedChecksum;
+
         var finished = await _repo.TryFinishCompleteAsync(uploadId, finalName, checksumToStore, ct);
         if (!finished)
         {
@@ -264,8 +272,8 @@ public class UploadService : IUploadService
             session.Id, session.FileName, finalName, session.TotalSize, session.ClientIp);
 
         _logger.LogInformation(
-            "Upload completed {UploadId} → {FinalFileName} (hash={HashMode})",
-            session.Id, finalName, computeHash ? "computed" : "skipped");
+            "Upload completed {UploadId} → {FinalFileName} (hash={HashMode}, clientExpected={HasExpected})",
+            session.Id, finalName, computeHash ? "computed" : "skipped", expectedChecksum is not null);
 
         await SafePublishCompletedAsync(session, ct);
 
