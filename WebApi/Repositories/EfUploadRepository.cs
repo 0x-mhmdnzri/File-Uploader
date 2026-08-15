@@ -71,6 +71,24 @@ public class EfUploadRepository : IUploadRepository
             .ToListAsync(ct);
     }
 
+    public Task<UploadSession?> FindCompletedByContentAsync(
+        string checksumSha256Hex,
+        long totalSize,
+        CancellationToken ct = default)
+    {
+        var hash = checksumSha256Hex.Trim().ToLowerInvariant();
+        if (hash.StartsWith("sha256:"))
+            hash = hash["sha256:".Length..];
+
+        return _db.UploadSessions.AsNoTracking()
+            .Where(x => x.Status == UploadStatus.Completed
+                        && x.TotalSize == totalSize
+                        && x.Checksum == hash
+                        && x.FinalFileName != null)
+            .OrderByDescending(x => x.CompletedAt)
+            .FirstOrDefaultAsync(ct);
+    }
+
     public Task<int> CountActivePendingByIpAsync(string clientIp, CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
@@ -161,7 +179,6 @@ public class EfUploadRepository : IUploadRepository
 
     public async Task<bool> TryClaimExpiredAsync(Guid id, CancellationToken ct = default)
     {
-        // Thin distributed lock via DB CAS: only one node claims the cleanup lease.
         var now = DateTime.UtcNow;
         var rows = await _db.UploadSessions
             .Where(x => x.Id == id
