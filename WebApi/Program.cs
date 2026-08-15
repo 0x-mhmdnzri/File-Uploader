@@ -66,7 +66,6 @@ try
     var dbProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
     var migrationsAssembly = typeof(AppDbContext).Assembly.FullName;
 
-    // Resolve relative Sqlite paths against content root (stable under Rider/dotnet run).
     if (!string.Equals(dbProvider, "Postgres", StringComparison.OrdinalIgnoreCase) &&
         !string.Equals(dbProvider, "PostgreSQL", StringComparison.OrdinalIgnoreCase))
     {
@@ -131,24 +130,42 @@ try
         .AddDbContextCheck<AppDbContext>("database", tags: ["ready"])
         .AddCheck<StorageHealthCheck>("storage", tags: ["ready"]);
 
+    // Dev: any localhost / 127.0.0.1 origin (Rider may use random ports).
+    // Prod: tighten WithOrigins to real frontends only.
     builder.Services.AddCors(options =>
     {
         options.AddPolicy("AllowFrontend", policy =>
         {
-            policy
-                .WithOrigins(
-                    "http://localhost:5074",
-                    "https://localhost:5074",
-                    "http://localhost:5073",
-                    "https://localhost:5073",
-                    "https://localhost:7097",
-                    "http://localhost:5097",
-                    "http://localhost:3000",
-                    "http://localhost:5173",
-                    "https://localhost:5173")
-                .AllowAnyHeader()
-                .AllowAnyMethod()
-                .AllowCredentials();
+            if (builder.Environment.IsDevelopment())
+            {
+                policy
+                    .SetIsOriginAllowed(static origin =>
+                    {
+                        if (string.IsNullOrEmpty(origin)) return false;
+                        try
+                        {
+                            var uri = new Uri(origin);
+                            return uri.Host is "localhost" or "127.0.0.1";
+                        }
+                        catch
+                        {
+                            return false;
+                        }
+                    })
+                    .AllowAnyHeader()
+                    .AllowAnyMethod()
+                    .AllowCredentials();
+            }
+            else
+            {
+                policy
+                    .WithOrigins(
+                        "http://localhost:5074",
+                        "https://localhost:7097")
+                    .AllowAnyHeader()
+                    .AllowAnyMethod()
+                    .AllowCredentials();
+            }
         });
     });
 
