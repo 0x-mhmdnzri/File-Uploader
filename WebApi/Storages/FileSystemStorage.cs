@@ -10,8 +10,6 @@ namespace WebApi.Storages;
 /// <summary>
 /// Own data-plane storage on a local or <b>shared</b> filesystem.
 /// Part layout (P4.2 / D5): <c>{TempPath}/{uploadId}/part/{index}</c>
-/// — stable, hierarchical, identical on every node that mounts the same volume.
-/// Merge and verify only use these helpers (D9: no node-local-only assumptions).
 /// </summary>
 public sealed class FileSystemStorage : IFileStorage, IDisposable
 {
@@ -34,27 +32,14 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
 
     public void Dispose() => _diskGate.Dispose();
 
-    // -------------------------------------------------------------------------
-    // P4.2 D5 — Stable part key helpers (single source of truth for paths)
-    // Layout: {TempPath}/{uploadId}/part/{index}
-    // -------------------------------------------------------------------------
-
-    /// <summary>Session temp directory on the (possibly shared) volume.</summary>
     private string SessionTempDir(Guid uploadId) =>
         Path.Combine(_options.TempPath, uploadId.ToString("N"));
 
-    /// <summary>Directory that holds all parts for one upload.</summary>
     private string PartDir(Guid uploadId) =>
         Path.Combine(SessionTempDir(uploadId), "part");
 
-    /// <summary>
-    /// Stable part path: <c>{TempPath}/{uploadId}/part/{index}</c>.
-    /// Same key on every API node when TempPath is a shared mount (D6).
-    /// </summary>
     private string PartPath(Guid uploadId, int chunkIndex) =>
         Path.Combine(PartDir(uploadId), chunkIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
-
-    // -------------------------------------------------------------------------
 
     public Task EnsureDirectoriesAsync(CancellationToken ct = default)
     {
@@ -116,12 +101,16 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         int totalChunks,
         long totalSize,
         int chunkSize,
+        bool computeHash = true,
         CancellationToken ct = default)
     {
-        // D9: merge only reads parts via PartPath — never a node-local scratch path.
+        // No client checksum → parallel offset merge, skip multi-GB SHA (dominant complete latency).
+        if (!computeHash)
+            return MergeParallelThenHashAsync(uploadId, fileName, totalChunks, totalSize, chunkSize, hash: false, ct);
+
         return _options.SinglePassMergeAndHash
             ? MergeSinglePassAsync(uploadId, fileName, totalChunks, totalSize, ct)
-            : MergeParallelThenHashAsync(uploadId, fileName, totalChunks, totalSize, chunkSize, ct);
+            : MergeParallelThenHashAsync(uploadId, fileName, totalChunks, totalSize, chunkSize, hash: true, ct);
     }
 
     private async Task<(string Path, string Sha256Hex)> MergeSinglePassAsync(
@@ -208,6 +197,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         int totalChunks,
         long totalSize,
         int chunkSize,
+        bool hash,
         CancellationToken ct)
     {
         Directory.CreateDirectory(_options.FinalPath);
@@ -311,7 +301,10 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                 $"Parallel merge size mismatch. Expected {totalSize}, file length {finalInfo.Length}.");
         }
 
-        var sha256Hex = await _hasher.ComputeSha256Async(finalPath, ct).ConfigureAwait(false);
+        string sha256Hex = string.Empty;
+        if (hash)
+            sha256Hex = await _hasher.ComputeSha256Async(finalPath, ct).ConfigureAwait(false);
+
         await DeleteTempFolderAsync(uploadId, ct).ConfigureAwait(false);
         return (finalPath, sha256Hex);
     }
