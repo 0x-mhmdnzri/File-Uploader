@@ -82,6 +82,29 @@ public class InMemoryUploadRepository : IUploadRepository
         return Task.FromResult(hit);
     }
 
+    public Task<UploadSession?> FindCompletedByFingerprintAsync(
+        string contentFingerprintHex,
+        long totalSize,
+        CancellationToken ct = default)
+    {
+        var fp = contentFingerprintHex.Trim().ToLowerInvariant();
+        if (fp.StartsWith("fp:"))
+            fp = fp[3..];
+        else if (fp.StartsWith("sample:"))
+            fp = fp[7..];
+
+        var hit = _store.Values
+            .Where(s => s.Status == UploadStatus.Completed
+                        && s.TotalSize == totalSize
+                        && string.Equals(s.ContentFingerprint, fp, StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrEmpty(s.FinalFileName))
+            .OrderByDescending(s => s.CompletedAt)
+            .Select(Clone)
+            .FirstOrDefault();
+
+        return Task.FromResult(hit);
+    }
+
     public Task<int> CountActivePendingByIpAsync(string clientIp, CancellationToken cancellationToken = default)
     {
         var now = DateTime.UtcNow;
@@ -157,6 +180,7 @@ public class InMemoryUploadRepository : IUploadRepository
         Guid id,
         string finalFileName,
         string? checksum,
+        string? contentFingerprint = null,
         CancellationToken cancellationToken = default)
     {
         lock (_gate)
@@ -171,6 +195,7 @@ public class InMemoryUploadRepository : IUploadRepository
             next.Status = UploadStatus.Completed;
             next.FinalFileName = finalFileName;
             next.Checksum = checksum;
+            next.ContentFingerprint = contentFingerprint ?? next.ContentFingerprint;
             next.CompletedAt = DateTime.UtcNow;
             next.Version = current.Version + 1;
             _store[id] = next;
@@ -251,6 +276,7 @@ public class InMemoryUploadRepository : IUploadRepository
         CompletedAt = s.CompletedAt,
         ExpiresAt = s.ExpiresAt,
         Checksum = s.Checksum,
+        ContentFingerprint = s.ContentFingerprint,
         ContentType = s.ContentType,
         ClientIp = s.ClientIp,
         ReceivedChunksCsv = s.ReceivedChunksCsv
