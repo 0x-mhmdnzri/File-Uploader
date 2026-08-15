@@ -1,0 +1,74 @@
+# Two-process multi-instance lab / CI (P4.5 expanded).
+# Usage:
+#   docker compose -f docker-compose.multi.yml up --build -d
+#   BASE_A=http://localhost:5073 BASE_B=http://localhost:5075 ./tools/proofs/http-proofs.sh
+#   docker compose -f docker-compose.multi.yml down -v
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: fileuploader
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d fileuploader"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api-a:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      Database__Provider: Postgres
+      ConnectionStrings__Default: Host=db;Port=5432;Database=fileuploader;Username=app;Password=secret
+      MultiInstance__Enabled: "true"
+      MultiInstance__SharedPartStoreConfigured: "true"
+      MultiInstance__RequirePostgres: "true"
+      StorageOptions__Provider: FileSystem
+      StorageOptions__TempPath: /data/temp
+      StorageOptions__FinalPath: /data/uploads
+      StorageOptions__PendingTtlHours: "24"
+      Auth__Enabled: "false"
+    volumes:
+      - shared_data:/data
+    ports:
+      - "5073:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      Database__Provider: Postgres
+      ConnectionStrings__Default: Host=db;Port=5432;Database=fileuploader;Username=app;Password=secret
+      MultiInstance__Enabled: "true"
+      MultiInstance__SharedPartStoreConfigured: "true"
+      MultiInstance__RequirePostgres: "true"
+      StorageOptions__Provider: FileSystem
+      StorageOptions__TempPath: /data/temp
+      StorageOptions__FinalPath: /data/uploads
+      StorageOptions__PendingTtlHours: "24"
+      Auth__Enabled: "false"
+    volumes:
+      - shared_data:/data
+    ports:
+      - "5075:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  shared_data:
