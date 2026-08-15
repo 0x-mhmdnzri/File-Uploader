@@ -1,5 +1,6 @@
 using WebApi.Domain;
 using WebApi.Repositories;
+using Xunit;
 
 namespace WebApi.Tests;
 
