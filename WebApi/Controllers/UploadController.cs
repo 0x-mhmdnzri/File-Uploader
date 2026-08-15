@@ -26,6 +26,9 @@ public class UploadController : ControllerBase
         _options = options.Value;
     }
 
+    /// <summary>
+    /// Start upload or return existing content when SHA-256 + size already Completed on shared store.
+    /// </summary>
     [HttpPost("initiate")]
     public async Task<IActionResult> Initiate(
         [FromForm] string fileName,
@@ -39,11 +42,31 @@ public class UploadController : ControllerBase
         {
             var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString();
 
-            var session = await _service.InitiateAsync(
+            var result = await _service.InitiateAsync(
                 fileName, totalSize, chunkSize, contentType, checksum, clientIp, ct);
+
+            var session = result.Session;
+
+            if (result.AlreadyExists)
+            {
+                return Ok(new
+                {
+                    alreadyExists = true,
+                    uploadId = session.Id,
+                    existingUploadId = session.Id,
+                    path = result.ExistingPath ?? session.FinalFileName,
+                    fileName = session.FileName,
+                    finalFileName = session.FinalFileName,
+                    totalSize = session.TotalSize,
+                    checksum = session.Checksum,
+                    status = session.Status.ToString(),
+                    message = "Identical content already stored; no upload required."
+                });
+            }
 
             return Ok(new
             {
+                alreadyExists = false,
                 uploadId = session.Id,
                 chunkSize = session.ChunkSize,
                 totalChunks = session.TotalChunks,
@@ -62,11 +85,6 @@ public class UploadController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Upload one chunk. Idempotent: if the part already exists on the shared store, returns 200.
-    /// Optional Content-Encoding: gzip|deflate|br.
-    /// Optional headers: X-Chunk-CRC32, X-Chunk-SHA256 (required when configured).
-    /// </summary>
     [HttpPut("{uploadId:guid}/chunk/{index:int}")]
     [RequestSizeLimit(100_000_000)]
     public async Task<IActionResult> UploadChunk(
@@ -78,8 +96,6 @@ public class UploadController : ControllerBase
         {
             await _service.EnsureCanAcceptChunkAsync(uploadId, index, ct);
 
-            // P4.3 D10 — idempotent PUT: shared part store already has this index.
-            // Safe under retries and multi-node (disk is source of truth for parts).
             if (await _storage.ChunkExistsAsync(uploadId, index))
             {
                 await _service.MarkChunkReceivedAsync(uploadId, index, ct);
