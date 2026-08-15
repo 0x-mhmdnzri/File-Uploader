@@ -12,7 +12,9 @@ public interface IFileStorage
     Task DeleteChunkAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default);
 
     /// <summary>
-    /// Pre-allocates / merges parts. Returns (final path, lowercase hex SHA-256).
+    /// Merges parts into the final object.
+    /// When <paramref name="computeHash"/> is false, skips full-file SHA-256 (much faster for multi-GB).
+    /// Returns (final path, lowercase hex SHA-256 or empty when hash skipped).
     /// </summary>
     Task<(string Path, string Sha256Hex)> MergeAsync(
         Guid uploadId,
@@ -20,6 +22,7 @@ public interface IFileStorage
         int totalChunks,
         long totalSize,
         int chunkSize,
+        bool computeHash = true,
         CancellationToken ct = default);
 
     Task<string> ComputeSha256Async(string filePath, CancellationToken ct = default);
