@@ -63,7 +63,8 @@ public class UploadController : ControllerBase
     }
 
     /// <summary>
-    /// Upload one chunk. Optional Content-Encoding: gzip|deflate|br.
+    /// Upload one chunk. Idempotent: if the part already exists on the shared store, returns 200.
+    /// Optional Content-Encoding: gzip|deflate|br.
     /// Optional headers: X-Chunk-CRC32, X-Chunk-SHA256 (required when configured).
     /// </summary>
     [HttpPut("{uploadId:guid}/chunk/{index:int}")]
@@ -76,6 +77,14 @@ public class UploadController : ControllerBase
         try
         {
             await _service.EnsureCanAcceptChunkAsync(uploadId, index, ct);
+
+            // P4.3 D10 — idempotent PUT: shared part store already has this index.
+            // Safe under retries and multi-node (disk is source of truth for parts).
+            if (await _storage.ChunkExistsAsync(uploadId, index))
+            {
+                await _service.MarkChunkReceivedAsync(uploadId, index, ct);
+                return Ok(new { idempotent = true, chunkIndex = index });
+            }
 
             var encoding = Request.Headers.ContentEncoding.ToString();
             await using var decoded = ChunkDecompression.Wrap(Request.Body, encoding);
@@ -143,7 +152,7 @@ public class UploadController : ControllerBase
             }
 
             await _service.MarkChunkReceivedAsync(uploadId, index, ct);
-            return Ok();
+            return Ok(new { idempotent = false, chunkIndex = index });
         }
         catch (InvalidOperationException ex)
         {
