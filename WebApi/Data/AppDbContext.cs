@@ -49,5 +49,7 @@ public class AppDbContext : DbContext
         entity.HasIndex(x => x.ExpiresAt);
         entity.HasIndex(x => new { x.Status, x.ExpiresAt });
         entity.HasIndex(x => new { x.ClientIp, x.Status });
+        // Content-addressed dedupe: Completed + checksum + size
+        entity.HasIndex(x => new { x.Checksum, x.TotalSize, x.Status });
     }
 }
