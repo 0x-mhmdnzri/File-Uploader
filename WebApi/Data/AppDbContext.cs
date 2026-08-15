@@ -39,6 +39,9 @@ public class AppDbContext : DbContext
         entity.Property(x => x.Checksum)
             .HasMaxLength(128);
 
+        entity.Property(x => x.ContentFingerprint)
+            .HasMaxLength(128);
+
         entity.Property(x => x.ContentType)
             .HasMaxLength(256);
 
@@ -49,7 +52,7 @@ public class AppDbContext : DbContext
         entity.HasIndex(x => x.ExpiresAt);
         entity.HasIndex(x => new { x.Status, x.ExpiresAt });
         entity.HasIndex(x => new { x.ClientIp, x.Status });
-        // Content-addressed dedupe: Completed + checksum + size
         entity.HasIndex(x => new { x.Checksum, x.TotalSize, x.Status });
+        entity.HasIndex(x => new { x.ContentFingerprint, x.TotalSize, x.Status });
     }
 }

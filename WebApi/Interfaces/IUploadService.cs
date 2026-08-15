@@ -6,7 +6,7 @@ public interface IUploadService
 {
     /// <summary>
     /// Creates a pending session, or returns an existing Completed object when content matches
-    /// (SHA-256 + size + final file present on shared store).
+    /// (full SHA-256 or sample fingerprint + size + final file present on shared store).
     /// </summary>
     Task<InitiateResult> InitiateAsync(
         string fileName,
@@ -14,6 +14,7 @@ public interface IUploadService
         int chunkSize,
         string? contentType = null,
         string? checksum = null,
+        string? contentFingerprint = null,
         string? clientIp = null,
         CancellationToken ct = default);
 

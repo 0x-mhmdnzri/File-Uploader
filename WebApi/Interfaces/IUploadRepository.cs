@@ -11,12 +11,13 @@ public interface IUploadRepository
 
     Task<IReadOnlyList<UploadSession>> GetExpiredPendingAsync(CancellationToken ct = default);
 
-    /// <summary>
-    /// Content-addressed lookup: Completed session with same SHA-256 and total size (newest first).
-    /// Shared across nodes via Postgres/Sqlite — works regardless of which node originally uploaded.
-    /// </summary>
     Task<UploadSession?> FindCompletedByContentAsync(
         string checksumSha256Hex,
+        long totalSize,
+        CancellationToken ct = default);
+
+    Task<UploadSession?> FindCompletedByFingerprintAsync(
+        string contentFingerprintHex,
         long totalSize,
         CancellationToken ct = default);
 
@@ -33,6 +34,7 @@ public interface IUploadRepository
         Guid id,
         string finalFileName,
         string? checksum,
+        string? contentFingerprint = null,
         CancellationToken ct = default);
 
     Task<bool> TryFailCompleteAsync(Guid id, string? checksum, CancellationToken ct = default);
