@@ -247,6 +247,28 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
         }
     }
 
+    public async Task<bool> FinalObjectExistsAsync(string fileName, long? expectedSize = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+            return false;
+
+        var key = fileName.StartsWith("s3://", StringComparison.OrdinalIgnoreCase)
+            ? fileName.Split('/', 4).Last()
+            : FinalKey(fileName);
+
+        try
+        {
+            var meta = await _s3.GetObjectMetadataAsync(_options.Bucket, key, ct).ConfigureAwait(false);
+            if (expectedSize is long size && meta.ContentLength != size)
+                return false;
+            return true;
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+    }
+
     public Task<string> GetTempFolderAsync(Guid uploadId) =>
         Task.FromResult($"s3://{_options.Bucket}/{TempPrefix(uploadId)}");
 
