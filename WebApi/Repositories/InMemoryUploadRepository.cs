@@ -61,6 +61,27 @@ public class InMemoryUploadRepository : IUploadRepository
         return Task.FromResult<IReadOnlyList<UploadSession>>(expired);
     }
 
+    public Task<UploadSession?> FindCompletedByContentAsync(
+        string checksumSha256Hex,
+        long totalSize,
+        CancellationToken ct = default)
+    {
+        var hash = checksumSha256Hex.Trim().ToLowerInvariant();
+        if (hash.StartsWith("sha256:"))
+            hash = hash["sha256:".Length..];
+
+        var hit = _store.Values
+            .Where(s => s.Status == UploadStatus.Completed
+                        && s.TotalSize == totalSize
+                        && string.Equals(s.Checksum, hash, StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrEmpty(s.FinalFileName))
+            .OrderByDescending(s => s.CompletedAt)
+            .Select(Clone)
+            .FirstOrDefault();
+
+        return Task.FromResult(hit);
+    }
+
     public Task<int> CountActivePendingByIpAsync(string clientIp, CancellationToken cancellationToken = default)
     {
         var now = DateTime.UtcNow;
