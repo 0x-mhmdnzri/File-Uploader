@@ -1,6 +1,6 @@
 # BACKLOG — File Uploader (own file service, S3-inspired)
 
-Last updated: 2026-08-15 (`dev`) — P4.0 + D1–D4 done.
+Last updated: 2026-08-15 (`dev`) — P4.2 D5–D7/D9 done.
 
 ---
 
@@ -21,18 +21,16 @@ Last updated: 2026-08-15 (`dev`) — P4.0 + D1–D4 done.
 - [x] D3 CAS Pending → Completing → Completed/Failed
 - [x] D4 Complete ignores session cache
 
+### P4.2 Shared part store (D5–D7, D9)
+- [x] D5 Stable part key `{uploadId}/part/{index}` (FS + S3 aligned)
+- [x] D6 Shared filesystem volume gate + boot log of resolved TempPath/FinalPath
+- [x] D7 Shared-FS failure modes documented in `docs/MULTI-INSTANCE.md`
+- [x] D9 Merge never assumes node-local-only temp (centralized `PartPath` helpers)
+- [ ] D8 Owned blob nodes design (later)
+
 ---
 
 ## P4 remaining — next
-
-### P4.2 Shared part store
-| ID | Task |
-|----|------|
-| D5 | Stable part key `{uploadId}/part/{index}` |
-| D6 | Shared filesystem volume (two nodes, one volume); set `SharedPartStoreConfigured` |
-| D7 | Shared-FS failure modes in docs |
-| D8 | Owned blob nodes design (later) |
-| D9 | Merge never assumes node-local-only temp |
 
 ### P4.3–P4.5
 | ID | Task |
@@ -41,6 +39,6 @@ Last updated: 2026-08-15 (`dev`) — P4.0 + D1–D4 done.
 | D13–D15 | LB docs, readiness |
 | D16–D18 | Chaos / happy / double-complete proof |
 
-**Next implement:** D5–D6.
+**Next implement:** D10–D12 (idempotent PUT + cluster-safe cleanup).
 
 See `docs/MULTI-INSTANCE.md`.
