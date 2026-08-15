@@ -117,7 +117,6 @@ try
 
     builder.Services.AddHostedService<OrphanCleanupService>();
 
-    // P4.4 — liveness vs readiness for load balancers
     builder.Services.AddHealthChecks()
         .AddCheck("self", () => HealthCheckResult.Healthy("process up"), tags: ["live"])
         .AddDbContextCheck<AppDbContext>("database", tags: ["ready"])
@@ -146,7 +145,6 @@ try
 
     var app = builder.Build();
 
-    // P4.0 — fail fast on forbidden multi-instance shortcuts
     {
         var mi = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MultiInstanceOptions>>().Value;
         var storage = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<StorageOptions>>().Value;
@@ -154,10 +152,24 @@ try
         MultiInstanceStartupGuard.ValidateOrThrow(mi, storage, dbProvider, guardLogger);
     }
 
+    // EF migrations (replaces EnsureCreated) — applies pending migrations on boot.
     using (var scope = app.Services.CreateScope())
     {
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        await db.Database.EnsureCreatedAsync();
+        var migrateLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("Database");
+        try
+        {
+            await db.Database.MigrateAsync();
+            migrateLogger.LogInformation("Database migrations applied (Provider={Provider})", dbProvider);
+        }
+        catch (Exception ex)
+        {
+            // Lab DBs created with EnsureCreated have no __EFMigrationsHistory — wipe or baseline.
+            migrateLogger.LogError(ex,
+                "MigrateAsync failed. If upgrading from EnsureCreated, delete the lab DB file or baseline migrations.");
+            throw;
+        }
     }
 
     app.UseSerilogRequestLogging(opts =>
@@ -177,7 +189,6 @@ try
     app.UseMiddleware<ApiKeyMiddleware>();
     app.MapControllers();
 
-    // Liveness: process is running (no dependency checks) — k8s livenessProbe
     app.MapHealthChecks("/health/live", new HealthCheckOptions
     {
         Predicate = r => r.Tags.Contains("live"),
@@ -190,7 +201,6 @@ try
         }
     });
 
-    // Readiness: Postgres + shared storage writable — LB / k8s readinessProbe
     app.MapHealthChecks("/health/ready", new HealthCheckOptions
     {
         Predicate = r => r.Tags.Contains("ready"),
@@ -203,7 +213,6 @@ try
         }
     });
 
-    // Aggregate (live + ready) for humans / monitoring
     app.MapHealthChecks("/health", new HealthCheckOptions
     {
         ResponseWriter = HealthCheckResponseWriter.WriteAsync,
