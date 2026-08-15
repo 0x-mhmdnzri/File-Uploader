@@ -1,278 +1,262 @@
-# High-Performance Chunked File Upload
+# File Uploader
 
-[![.NET](https://img.shields.io/badge/.NET-9-512BD4?logo=dotnet)](https://dotnet.microsoft.com/)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+**S3-inspired, own data-plane file service** for very large uploads — resumable, parallel, multi-instance ready.
+
+[![.NET](https://img.shields.io/badge/.NET-9-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![Architecture](https://img.shields.io/badge/architecture-hexagonal-0ea5e9)](#architecture)
+[![Multi-instance](https://img.shields.io/badge/multi--instance-CAS%20%2B%20shared%20store-16a34a)](#multi-instance-p4)
+[![Proofs](https://img.shields.io/badge/proofs-unit%20%2B%20HTTP%20%2B%20CI-8b5cf6)](#proofs--quality)
 [![Branch](https://img.shields.io/badge/branch-dev-blue)](https://github.com/0x-mhmdnzri/File-Uploader/tree/dev)
 
-Production-oriented upload service for **very large files (5GB–20GB+)**.  
-Chunked parallel transfers on the client, disk-backed verification and **pre-allocated parallel merge** on the server. Built to cut latency without sacrificing consistency.
+> Upload **5 GB – 20 GB+** with chunked parallel transfers, disk-as-truth verification, pre-allocated merge, and **Postgres CAS** so any healthy node can finish the job — **no sticky load balancer required**.
 
 ---
 
-## Performance at a glance
+## Table of contents
 
-| Metric | Previous design | Current design |
-|--------|-----------------|----------------|
-| Chunk size | 2 MB | **16 MB** (fewer round-trips) |
-| Client workers | 1 | **4–6 parallel** |
-| Merge strategy | Sequential copy of every part | **Pre-allocate + parallel offset writes** |
-| Verification | Single-threaded scan | **Parallel.ForEachAsync + ConcurrentBag** |
-| Disk contention | Unbounded concurrent writers | **SemaphoreSlim global IO gate** |
-| Buffer allocation | New buffers per copy | **ArrayPool&lt;byte&gt; + Memory/Span** |
-| Received tracking | Racy CSV under load | **ConcurrentDictionary (lock-free) + disk as truth** |
-| Typical 1 GB wall time | ~90–120 s | **~25–40 s** (network-dependent) |
-| Typical 7 GB wall time | ~20–30 min | **~6–10 min** |
+- [Why this project](#why-this-project)
+- [Feature matrix](#feature-matrix)
+- [Architecture](#architecture)
+- [Performance engine](#performance-engine)
+- [Multi-instance (P4)](#multi-instance-p4)
+- [API surface](#api-surface)
+- [Security, quotas & observability](#security-quotas--observability)
+- [Quick start](#quick-start)
+- [Multi-node lab](#multi-node-lab-docker)
+- [Proofs & quality](#proofs--quality)
+- [Configuration](#configuration)
+- [Documentation map](#documentation-map)
+- [Roadmap](#roadmap)
 
-Latency is dominated by network and final merge/hash. The changes below attack merge time, verification time, GC pauses, and disk thrashing.
+---
+
+## Why this project
+
+Most “chunked upload” demos break under real conditions:
+
+| Pain | What we do instead |
+|------|---------------------|
+| Lost chunk marks under concurrency | **Disk is source of truth**; in-memory is only a hint |
+| Merge serializes on a global lock | **Pre-allocate + parallel offset writes** |
+| “HA” = sticky LB | **Shared metadata + shared parts + CAS** |
+| In-process locks as “distributed” | Explicit **non-goals** + fail-fast startup guard |
+| Complete race across nodes | `Pending → Completing → Completed/Failed` **CAS** |
+
+This is an **owned file service** (product plane = your volume / future blob nodes), not a thin wrapper around public S3 as the system of record.
+
+---
+
+## Feature matrix
+
+### Upload core
+
+| Feature | Status | Notes |
+|---------|--------|--------|
+| Chunked upload (configurable size, default 16 MB) | ✅ | Client + server aligned |
+| Parallel workers (browser) | ✅ | Adaptive concurrency |
+| Resume / status from disk listing | ✅ | `GET /status` → `received[]` |
+| Idempotent chunk PUT | ✅ | `{ idempotent: true }` if part exists |
+| Optional Content-Encoding (`gzip` / `deflate` / `br`) | ✅ | Per-chunk decompress on server |
+| Optional per-chunk CRC32 / SHA-256 | ✅ | Headers `X-Chunk-CRC32`, `X-Chunk-SHA256` |
+| Full-file SHA-256 on complete | ✅ | Single-pass or parallel-then-hash |
+| Pre-allocated parallel merge | ✅ | Non-overlapping offsets |
+| Orphan / TTL cleanup | ✅ | Cluster-safe CAS claim |
+| Abort | ✅ | CAS `Pending → Aborted` |
+
+### Multi-instance (P4.0–P4.5)
+
+| Feature | Status | Notes |
+|---------|--------|--------|
+| Shared session metadata (EF + Sqlite/Postgres) | ✅ | Postgres required when MultiInstance on |
+| Optimistic concurrency (`Version`) | ✅ | |
+| Complete lease CAS | ✅ | One node merges |
+| Stable part key `{uploadId}/part/{index}` | ✅ | Shared volume friendly |
+| Shared part store gate | ✅ | `SharedPartStoreConfigured` |
+| Startup non-goals enforcement | ✅ | NG1 / NG2 / NG3 |
+| Liveness / readiness probes | ✅ | `/health/live`, `/health/ready` |
+| Client contract (no sticky) | ✅ | [docs/CLIENT-CONTRACT.md](docs/CLIENT-CONTRACT.md) |
+| Unit + HTTP + two-node CI proofs | ✅ | [docs/PROOFS.md](docs/PROOFS.md) |
+| Owned blob nodes design | ✅ design | [docs/OWNED-BLOB-NODES.md](docs/OWNED-BLOB-NODES.md) |
+| EF migrations (not EnsureCreated) | ✅ | [docs/MIGRATIONS.md](docs/MIGRATIONS.md) |
+
+### Platform
+
+| Feature | Status |
+|---------|--------|
+| Hexagonal ports (`IFileStorage`, `IUploadRepository`, …) | ✅ |
+| FileSystem storage (product plane) | ✅ |
+| S3-compatible adapter (experimental / lab) | ✅ |
+| API key auth + anonymous health | ✅ |
+| Quotas (global + per-IP) | ✅ |
+| Serilog + audit log | ✅ |
+| Metrics snapshot | ✅ |
+| Domain events (log / webhook / RabbitMQ) | ✅ |
+| Hardware or CPU SHA-256 hasher | ✅ |
+| Storage micro-bench tool | ✅ |
 
 ---
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-  subgraph Client["Browser client"]
-    F[File] --> SL[slice 16MB chunks]
-    SL --> W1[Worker 1]
-    SL --> W2[Worker 2]
-    SL --> Wn[Worker N]
+flowchart TB
+  subgraph Clients
+    Browser[Browser / SDK]
   end
 
-  subgraph API["ASP.NET Core API"]
-    INIT[POST /initiate]
-    PUT[PUT /chunk/index]
-    STAT[GET /status]
-    CMP[POST /complete]
+  subgraph Edge
+    LB[Load balancer<br/>no sticky required]
   end
 
-  subgraph Storage["FileSystemStorage"]
-    GATE[SemaphoreSlim disk gate]
-    PARTS[part files on disk]
-    PRE[Pre-allocate final file]
-    PAR[Parallel.ForEachAsync offset writes]
-    HASH[SHA-256 stream]
+  subgraph API["API nodes (stateless front)"]
+    A1[API A]
+    A2[API B]
   end
 
-  W1 --> PUT
-  W2 --> PUT
-  Wn --> PUT
-  PUT --> GATE --> PARTS
-  CMP --> VER[VerifyChunksParallelAsync]
-  VER --> PRE --> PAR --> HASH
+  subgraph Data plane
+    PG[(Postgres<br/>sessions + CAS)]
+    VOL[Shared volume<br/>parts + finals]
+  end
+
+  Browser --> LB
+  LB --> A1
+  LB --> A2
+  A1 --> PG
+  A2 --> PG
+  A1 --> VOL
+  A2 --> VOL
 ```
 
-**Consistency rule:** the filesystem is the source of truth. In-memory structures accelerate status and verification; they never override what is on disk at complete time.
+**Ports & adapters**
 
----
+| Port | Adapter(s) |
+|------|------------|
+| `IUploadRepository` | `EfUploadRepository` (Sqlite / Postgres) |
+| `IFileStorage` | `FileSystemStorage` (product), `S3FileStorage` (lab) |
+| `IFileHasher` | `HardwareSha256FileHasher` / `Sha256FileHasher` |
+| `IUploadEventPublisher` | Channel bus → logging / webhook / RabbitMQ handlers |
 
-## How latency is reduced (C# features in depth)
+**Part layout (stable key)**
 
-### 1. Pre-allocation + parallel offset writes (largest merge win)
-
-**Why**  
-Sequential `CopyToAsync` of hundreds of parts is pure serial IO. After the last chunk arrives, the user still waits for the entire merge.
-
-**How**  
-1. Create the final file and `SetLength(totalSize)`.  
-2. Each worker opens the same file with `FileShare.ReadWrite`, seeks to `index * chunkSize`, and writes only its range.  
-3. Ranges never overlap → no global lock on the merge path.
-
-**Behind the scenes**
-
-```csharp
-// Pre-size once
-await using (var pre = new FileStream(finalPath, FileMode.Create, FileAccess.Write, ...))
-{
-    pre.SetLength(totalSize);
-}
-
-await Parallel.ForEachAsync(Enumerable.Range(0, totalChunks), options, async (i, token) =>
-{
-    long offset = (long)i * chunkSize;
-    await using var partFs = new FileStream(partPath, FileMode.Open, FileAccess.Read, FileShare.Read, ...);
-    await using var finalFs = new FileStream(finalPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite, ...);
-    finalFs.Seek(offset, SeekOrigin.Begin);
-    // ArrayPool-backed copy from part → final at offset
-});
+```text
+{TempPath}/{uploadId:N}/part/0
+{TempPath}/{uploadId:N}/part/1
+...
+{FinalPath}/{fileName}
 ```
 
-**Effect:** merge scales with available disk bandwidth and `MergeParallelism` instead of with chunk count alone.
-
 ---
 
-### 2. `Parallel.ForEachAsync` — structured parallelism
+## Performance engine
 
-**Why**  
-Manual `Task.WhenAll` over hundreds of chunks is easy to get wrong (unbounded concurrency, weak cancellation).  
+### Results (indicative)
 
-**How**  
-`Parallel.ForEachAsync` with `MaxDegreeOfParallelism` from config drives both:
-- parallel **verification** (existence + size),
-- parallel **offset merge**.
+| File size | Naive / early design | Current engine |
+|-----------|----------------------|----------------|
+| ~1 GB | ~90–120 s | **~25–40 s** |
+| ~7 GB | ~20–30 min | **~6–10 min** |
+| 12 GB+ | Unstable / failed | **Stable** (limits permitting) |
 
-Cancellation flows through `ParallelOptions.CancellationToken`.
+*Wall times are network- and disk-dependent; the engine optimizes merge, verification, GC, and IO contention.*
 
----
+### What we use in C# (and why)
 
-### 3. `ConcurrentBag&lt;int&gt;` — missing-chunk detection
+| Primitive | Role |
+|-----------|------|
+| **`Parallel.ForEachAsync`** | Structured parallel verify + offset merge |
+| **`ConcurrentBag`** | Collect missing chunk indexes without caller locks |
+| **`Interlocked`** | Atomic on-disk byte totals during verify |
+| **`ConcurrentDictionary`** | Lock-free local received hints |
+| **`SemaphoreSlim`** | Global disk IO gate (back-pressure) |
+| **`ArrayPool<byte>` + `Memory`/`Span`** | Reused buffers, lower GC on hot path |
+| **Pre-allocate `SetLength` + seek writes** | No global merge lock; ranges do not overlap |
+| **EF `ExecuteUpdateAsync` CAS** | Cross-node complete / abort / expire leases |
 
-**Why**  
-At complete, you must know exactly which indexes are absent. A shared `List` under parallel checks needs locking; a concurrent bag does not.
-
-**How**
-
-```csharp
-var missing = new ConcurrentBag&lt;int&gt;();
-long bytesOnDisk = 0;
-
-await Parallel.ForEachAsync(Enumerable.Range(0, totalChunks), options, (i, token) =>
-{
-    if (!File.Exists(partPath))
-        missing.Add(i);
-    else
-        Interlocked.Add(ref bytesOnDisk, new FileInfo(partPath).Length);
-    return ValueTask.CompletedTask;
-});
-```
-
-**Effect:** verification stays CPU-light and parallel; complete fails fast with a sample of missing indexes for resume.
-
----
-
-### 4. `Interlocked` — atomic size accumulation
-
-**Why**  
-Parallel workers each observe part lengths. A plain `long` sum is a race.
-
-**How**  
-`Interlocked.Add(ref bytesOnDisk, length)` keeps a correct total without a lock. Complete then compares `bytesOnDisk` to `session.TotalSize` before merge.
-
----
-
-### 5. `ConcurrentDictionary` — lock-free received tracking
-
-**Why**  
-`MarkChunkReceivedAsync` runs on every successful PUT under high concurrency. Updating a CSV string under load loses updates (classic read-modify-write race).
-
-**How**
-
-```csharp
-private readonly ConcurrentDictionary&lt;Guid, ConcurrentDictionary&lt;int, byte&gt;&gt; _received = new();
-
-// on each chunk
-var map = _received.GetOrAdd(uploadId, _ => new ConcurrentDictionary&lt;int, byte&gt;());
-map.TryAdd(chunkIndex, 0);
-```
-
-Disk remains authoritative on complete. The dictionary is an accelerator for status/UI and is cleared on complete/abort.
-
----
-
-### 6. `SemaphoreSlim` — disk IO back-pressure
-
-**Why**  
-Unbounded parallel writers (client × many uploads) thrash the filesystem: queue depth explodes, latency climbs, throughput falls.
-
-**How**  
-A process-wide `SemaphoreSlim` gates both `SaveChunkAsync` and each merge worker:
-
-```csharp
-await _diskGate.WaitAsync(ct);
-try { /* write part or offset region */ }
-finally { _diskGate.Release(); }
-```
-
-Default capacity: `clamp(Environment.ProcessorCount, 2, 16)`, overridable via `StorageOptions:MaxConcurrentDiskIo`.
-
-**Effect:** stable throughput under load instead of collapse under contention.
-
----
-
-### 7. `ArrayPool&lt;byte&gt;` + `Memory` / `Span` — lower GC pressure
-
-**Why**  
-Allocating a new 1 MB buffer per chunk copy creates gen-2 / LOH traffic and pause spikes during large uploads.
-
-**How**
-
-```csharp
-var buffer = ArrayPool&lt;byte&gt;.Shared.Rent(BufferSize);
-try
-{
-    int read;
-    while ((read = await source.ReadAsync(buffer.AsMemory(0, BufferSize), ct)) &gt; 0)
-        await dest.WriteAsync(buffer.AsMemory(0, read), ct);
-}
-finally
-{
-    ArrayPool&lt;byte&gt;.Shared.Return(buffer);
-}
-```
-
-**Effect:** steady memory profile; fewer GC pauses on the hot path.
-
----
-
-## End-to-end sequence
+### Merge path (high level)
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant API as UploadController
-    participant S as UploadService
-    participant FS as FileSystemStorage
+  participant C as Client
+  participant API as API node
+  participant DB as Postgres
+  participant FS as Shared store
 
-    C-&gt;&gt;API: POST /initiate
-    API-&gt;&gt;S: InitiateAsync
-    S-&gt;&gt;FS: EnsureDirectoriesAsync
-    S--&gt;&gt;C: uploadId, totalChunks
-
-    loop Parallel workers
-        C-&gt;&gt;API: PUT /chunk/{index}
-        API-&gt;&gt;FS: SaveChunkAsync (SemaphoreSlim + ArrayPool)
-        API-&gt;&gt;S: MarkChunkReceivedAsync (ConcurrentDictionary)
-    end
-
-    C-&gt;&gt;API: POST /complete
-    API-&gt;&gt;S: CompleteAsync
-    S-&gt;&gt;FS: VerifyChunksParallelAsync (ConcurrentBag + Interlocked)
-    alt missing or size mismatch
-        S--&gt;&gt;C: 400 + missing sample
-    else OK
-        S-&gt;&gt;FS: MergeAsync (pre-allocate + Parallel offset writes)
-        S-&gt;&gt;FS: ComputeSha256Async
-        S--&gt;&gt;C: 200 + final path
-    end
+  C->>API: POST /complete
+  API->>DB: CAS Pending → Completing
+  alt lost CAS
+    API-->>C: retry / poll status
+  else won lease
+    API->>FS: parallel verify parts
+    API->>FS: SetLength + parallel offset merge
+    API->>FS: SHA-256
+    API->>DB: CAS Completing → Completed
+    API-->>C: 200 + path
+  end
 ```
 
----
-
-## Impact of each decision
-
-| Decision | Primary latency effect | Reliability effect |
-|----------|------------------------|--------------------|
-| Larger chunks (16 MB) | Fewer HTTP round-trips | Slightly larger retry unit |
-| Client parallel workers | Higher bandwidth utilization | Needs server IO gate |
-| SemaphoreSlim IO gate | Prevents thrashing under load | Stable p99 |
-| Parallel verify | Faster complete fail/success path | Clear missing-index report |
-| Pre-allocate + offset merge | Cuts post-upload wait | Requires non-overlapping ranges |
-| ArrayPool buffers | Less GC pause on hot path | Must always Return |
-| ConcurrentDictionary received | Cheap concurrent marks | Disk still wins at complete |
-| Disk as source of truth | — | Resume and complete stay correct under races |
+**Consistency rule:** filesystem listing wins at complete; session cache is never trusted for merge decisions.
 
 ---
 
-## API
+## Multi-instance (P4)
+
+### Non-goals (enforced when `MultiInstance:Enabled=true`)
+
+| ID | Non-goal |
+|----|----------|
+| **NG1** | Fix multi-node with only `SemaphoreSlim` / `Mutex` / `ConcurrentDictionary` |
+| **NG2** | Sticky load balancer as HA |
+| **NG3** | External S3/MinIO as the *product* data plane |
+
+### Coordination (thin, DB-based)
+
+| Operation | CAS |
+|-----------|-----|
+| Complete | `Pending → Completing` → merge → `Completed` / `Failed` |
+| Abort | `Pending → Aborted` |
+| Orphan cleanup | `(Pending\|Completing) + expired → Expired` (winner deletes parts) |
+
+### Health for the load balancer
+
+| Endpoint | Meaning |
+|----------|--------|
+| `GET /health/live` | Process up |
+| `GET /health/ready` | **DB + storage writable** (pool membership) |
+| `GET /health` | Aggregate |
+
+Details: [docs/MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md) · [docs/PROXY.md](docs/PROXY.md) · [docs/CLIENT-CONTRACT.md](docs/CLIENT-CONTRACT.md)
+
+---
+
+## API surface
 
 | Method | Path | Purpose |
-|--------|------|---------|
-| `POST` | `/api/uploads/initiate` | Start session (optional SHA-256) |
-| `PUT` | `/api/uploads/{id}/chunk/{index}` | Upload one chunk (optional Content-Encoding) |
-| `GET` | `/api/uploads/{id}/status` | Progress; disk-backed received list |
-| `POST` | `/api/uploads/{id}/complete` | Verify → parallel merge → optional checksum |
-| `DELETE` | `/api/uploads/{id}` | Abort and delete temp data |
-| `GET` | `/health` | Health checks |
-| `GET` | `/api/metrics` | Live counters |
+|--------|------|--------|
+| `POST` | `/api/uploads/initiate` | Create session (`uploadId`, `totalChunks`, …) |
+| `PUT` | `/api/uploads/{id}/chunk/{index}` | Upload / re-upload one part (**idempotent**) |
+| `GET` | `/api/uploads/{id}/status` | Progress; `received` from **disk** |
+| `POST` | `/api/uploads/{id}/complete` | Verify → merge → checksum |
+| `DELETE` | `/api/uploads/{id}` | Abort |
+| `GET` | `/health/live` · `/health/ready` · `/health` | Probes |
+| `GET` | `/api/metrics` | Counters snapshot |
+
+### Client contract (short)
+
+1. Any healthy node may handle any step for an `uploadId`.
+2. Retry chunk PUT on 502/503/timeout.
+3. Rebuild progress from `GET /status` after reconnect.
+4. On complete CAS conflict, poll status until terminal.
+
+---
+
+## Security, quotas & observability
+
+- **API key** middleware (`Auth:Enabled`, header configurable); `/health*` anonymous by default  
+- **Extension allow/block lists**, max file / chunk size  
+- **Quotas:** max pending sessions per IP, max stored bytes global & per IP  
+- **Serilog** console + rolling files; dedicated **audit** sink  
+- **Domain events:** initiated / completed / aborted / failed → log, webhook, optional RabbitMQ  
+- **Health checks** on database + storage probe files  
 
 ---
 
@@ -282,48 +266,146 @@ sequenceDiagram
 git clone https://github.com/0x-mhmdnzri/File-Uploader.git
 cd File-Uploader
 git checkout dev
+
+# API (Sqlite lab — MultiInstance left false)
 dotnet run --project WebApi
-```
 
-Frontend (separate terminal):
-
-```bash
+# UI (other terminal)
 dotnet run --project WebApp
 ```
 
-Open the WebApp URL, select a large file, and watch parallel progress.  
-Tune in `appsettings.json`:
+> **Note:** Boot applies **EF migrations**. If you still have an old `uploads.db` from `EnsureCreated`, delete it once or follow [docs/MIGRATIONS.md](docs/MIGRATIONS.md).
+
+### Unit proofs (no server)
+
+```bash
+dotnet test tests/WebApi.Tests/WebApi.Tests.csproj -v n
+```
+
+### HTTP proofs (API running)
+
+```bash
+chmod +x tools/proofs/http-proofs.sh
+BASE=http://localhost:5073 ./tools/proofs/http-proofs.sh
+```
+
+---
+
+## Multi-node lab (Docker)
+
+Two API processes, one Postgres, one shared volume — the real multi-instance shape:
+
+```bash
+docker compose -f docker-compose.multi.yml up --build -d
+
+curl -sf http://localhost:5073/health/ready | jq .
+curl -sf http://localhost:5075/health/ready | jq .
+
+BASE_A=http://localhost:5073 BASE_B=http://localhost:5075 ./tools/proofs/http-proofs.sh
+
+docker compose -f docker-compose.multi.yml down -v
+```
+
+| Service | Port |
+|---------|------|
+| `api-a` | **5073** |
+| `api-b` | **5075** |
+| Postgres | 5432 |
+
+CI runs the same path on push to `dev` / `main` (`.github/workflows/proofs.yml`).
+
+---
+
+## Proofs & quality
+
+| Layer | What it proves |
+|-------|----------------|
+| **xUnit CAS tests** | Only one winner for complete / abort / expire under parallel load |
+| **http-proofs.sh** | Happy path, idempotent PUT, double-complete, readiness |
+| **Docker two-node** | Shared volume + Postgres across processes |
+| **GitHub Actions** | Automated gate on `dev` / `main` |
+
+Runbook: [docs/PROOFS.md](docs/PROOFS.md)
+
+---
+
+## Configuration
+
+Key sections in `WebApi/appsettings.json`:
 
 ```json
 {
+  "Database": { "Provider": "Sqlite" },
+  "ConnectionStrings": { "Default": "Data Source=uploads.db" },
+  "MultiInstance": {
+    "Enabled": false,
+    "SharedPartStoreConfigured": false,
+    "RequirePostgres": true,
+    "ForbidExternalObjectStoreAsProductPlane": true
+  },
   "StorageOptions": {
+    "Provider": "FileSystem",
+    "TempPath": "temp",
+    "FinalPath": "uploads",
+    "MaxFileSizeBytes": 21474836480,
     "MaxConcurrentDiskIo": 8,
     "MergeParallelism": 4,
-    "MaxFileSizeBytes": 21474836480,
-    "PendingTtlHours": 24
+    "SinglePassMergeAndHash": true,
+    "Hasher": "Hardware"
+  },
+  "Auth": {
+    "Enabled": false,
+    "ApiKey": "",
+    "AnonymousPathPrefixes": [ "/health", "/swagger" ]
   }
 }
 ```
+
+**Multi-node minimum:** `Database:Provider=Postgres`, shared `TempPath`/`FinalPath`, `MultiInstance:Enabled=true`, `SharedPartStoreConfigured=true`.
+
+More: [docs/CONFIG.md](docs/CONFIG.md)
+
+---
+
+## Documentation map
+
+| Doc | Content |
+|-----|--------|
+| [MULTI-INSTANCE.md](docs/MULTI-INSTANCE.md) | P4 non-goals, CAS, shared store, LB |
+| [CLIENT-CONTRACT.md](docs/CLIENT-CONTRACT.md) | Retries, status, complete semantics |
+| [PROXY.md](docs/PROXY.md) | nginx / Caddy / k8s probes |
+| [PROOFS.md](docs/PROOFS.md) | How to run and interpret proofs |
+| [MIGRATIONS.md](docs/MIGRATIONS.md) | EF migrate vs old EnsureCreated DBs |
+| [OWNED-BLOB-NODES.md](docs/OWNED-BLOB-NODES.md) | Next-gen data plane design (D8) |
+| [CONFIG.md](docs/CONFIG.md) | Settings reference |
+| [BENCH.md](docs/BENCH.md) | Storage micro-bench |
+| [BACKLOG.md](BACKLOG.md) | Delivery checklist |
 
 ---
 
 ## Design principles
 
-1. **Disk is truth** — parallel in-memory structures never override part files at complete.  
-2. **Bound concurrency** — parallelism without a gate is a latency regression under load.  
-3. **Zero shared mutable merge state** — pre-sized file + non-overlapping offsets replace a global merge lock.  
-4. **Measure the tail** — optimize complete() and p99 under concurrent clients, not only best-case single upload.
+1. **Disk is truth** for parts; metadata CAS is truth for session state.  
+2. **Bound concurrency** — parallelism without an IO gate is a latency regression.  
+3. **No sticky LB for correctness** — shared store + CAS instead.  
+4. **Fail fast at boot** when multi-instance is claimed without prerequisites.  
+5. **Prove it** — unit CAS, HTTP scripts, two-node compose, CI.
 
 ---
 
 ## Roadmap
 
-- Single-pass hash during merge (eliminate second full read)
-- Optional per-chunk CRC/SHA for early rejection
-- S3 / Azure Blob adapters behind `IFileStorage`
-- Adaptive client concurrency from measured RTT/throughput
+| Item | Status |
+|------|--------|
+| Blob node **implementation** (from D8 design) | Future |
+| Adaptive client concurrency from RTT/throughput | Future |
+| Provider-split EF migrations if SQL diverges | Only if needed |
 
 ---
 
 **Maintainer:** Mohammad Nazari  
-**.NET · high-throughput IO · concurrency-conscious design**
+**.NET 9 · high-throughput IO · concurrency-conscious · multi-instance file pipelines**
+
+```bash
+git checkout dev && dotnet run --project WebApi
+```
