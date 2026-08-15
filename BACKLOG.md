@@ -1,6 +1,6 @@
 # BACKLOG — File Uploader (own file service, S3-inspired)
 
-Last updated: 2026-08-15 (`dev`) — P4.4 D13–D15 done.
+Last updated: 2026-08-15 (`dev`) — **P4 complete** (P4.0–P4.5).
 
 ---
 
@@ -38,15 +38,20 @@ Last updated: 2026-08-15 (`dev`) — P4.4 D13–D15 done.
 - [x] D14 `/health/live` + `/health/ready` (DB + storage tags)
 - [x] D15 Client contract (`docs/CLIENT-CONTRACT.md`) + `docs/PROXY.md` updates
 
+### P4.5 Proof tests (D16–D18)
+- [x] D16 Happy-path unit + HTTP proof
+- [x] D17 Double-complete CAS unit + parallel HTTP complete
+- [x] D18 Chaos: parallel claim-expired / abort + manual multi-node checklist
+- [x] `tests/WebApi.Tests`, `tools/proofs/http-proofs.sh`, `docs/PROOFS.md`
+
 ---
 
-## P4 remaining — next
+## Later (optional)
 
-### P4.5 Proofs
 | ID | Task |
 |----|------|
-| D16–D18 | Chaos / happy-path / double-complete proof scripts or runbook |
+| D8 | Owned blob nodes design |
+| — | EF migrations instead of EnsureCreated |
+| — | Expand HTTP proofs to true two-process CI |
 
-**Next implement:** D16–D18.
-
-See `docs/MULTI-INSTANCE.md`, `docs/PROXY.md`, `docs/CLIENT-CONTRACT.md`.
+See `docs/PROOFS.md`, `docs/MULTI-INSTANCE.md`.
