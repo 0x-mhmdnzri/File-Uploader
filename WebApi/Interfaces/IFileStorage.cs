@@ -6,16 +6,8 @@ public interface IFileStorage
 
     Task SaveChunkAsync(Guid uploadId, int chunkIndex, Stream data, CancellationToken ct = default);
 
-    /// <summary>
-    /// Deletes a single part file if present (e.g. after CRC mismatch).
-    /// </summary>
     Task DeleteChunkAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default);
 
-    /// <summary>
-    /// Merges parts into the final object.
-    /// When <paramref name="computeHash"/> is false, skips full-file SHA-256 (much faster for multi-GB).
-    /// Returns (final path, lowercase hex SHA-256 or empty when hash skipped).
-    /// </summary>
     Task<(string Path, string Sha256Hex)> MergeAsync(
         Guid uploadId,
         string fileName,
@@ -30,6 +22,12 @@ public interface IFileStorage
     Task DeleteTempFolderAsync(Guid uploadId, CancellationToken ct = default);
 
     Task DeleteFinalFileAsync(string fileName, CancellationToken ct = default);
+
+    /// <summary>
+    /// True when the final object exists and (when <paramref name="expectedSize"/> is set) length matches.
+    /// Used for content-addressed dedupe before trusting a Completed session row.
+    /// </summary>
+    Task<bool> FinalObjectExistsAsync(string fileName, long? expectedSize = null, CancellationToken ct = default);
 
     Task<string> GetTempFolderAsync(Guid uploadId);
 
