@@ -14,9 +14,10 @@ namespace WebApi.Storages;
 
 /// <summary>
 /// S3-compatible IFileStorage (AWS S3, MinIO, Cloudflare R2).
-/// Parts: {TempPrefix}{uploadId}/part{n}
-/// Final: {FinalPrefix}{fileName}
+/// Parts (P4.2 D5): <c>{TempPrefix}{uploadId}/part/{index}</c>
+/// Final: <c>{FinalPrefix}{fileName}</c>
 /// Merge streams parts into a final PutObject (portable; not server-side compose).
+/// Experimental only under MultiInstance (NG3) — product plane is shared FS / owned blob.
 /// </summary>
 public sealed class S3FileStorage : IFileStorage, IDisposable
 {
@@ -63,11 +64,12 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
         _s3.Dispose();
     }
 
+    // P4.2 D5 — stable part key: {TempPrefix}{uploadId}/part/{index}
     private string PartKey(Guid uploadId, int index) =>
-        $"{_options.TempPrefix.TrimEnd('/')}/{uploadId}/part{index}";
+        $"{_options.TempPrefix.TrimEnd('/')}/{uploadId:N}/part/{index}";
 
     private string TempPrefix(Guid uploadId) =>
-        $"{_options.TempPrefix.TrimEnd('/')}/{uploadId}/";
+        $"{_options.TempPrefix.TrimEnd('/')}/{uploadId:N}/";
 
     private string FinalKey(string fileName) =>
         $"{_options.FinalPrefix.TrimEnd('/')}/{Path.GetFileName(fileName)}";
@@ -143,7 +145,6 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
                         ct.ThrowIfCancellationRequested();
                         var partKey = PartKey(uploadId, i);
 
-                        // GetObjectResponse implements IDisposable only (not IAsyncDisposable).
                         using var part = await _s3.GetObjectAsync(_options.Bucket, partKey, ct)
                             .ConfigureAwait(false);
                         await using var partStream = part.ResponseStream;
@@ -269,7 +270,7 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
     public async Task<IReadOnlyCollection<int>> GetExistingChunkIndexesAsync(
         Guid uploadId, CancellationToken ct = default)
     {
-        var prefix = TempPrefix(uploadId);
+        var prefix = $"{TempPrefix(uploadId)}part/";
         var indexes = new List<int>();
         string? token = null;
 
@@ -285,8 +286,8 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
             foreach (var obj in list.S3Objects ?? [])
             {
                 var name = obj.Key[(obj.Key.LastIndexOf('/') + 1)..];
-                if (name.StartsWith("part", StringComparison.Ordinal) &&
-                    int.TryParse(name["part".Length..], out var idx))
+                if (int.TryParse(name, System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out var idx))
                 {
                     indexes.Add(idx);
                 }
