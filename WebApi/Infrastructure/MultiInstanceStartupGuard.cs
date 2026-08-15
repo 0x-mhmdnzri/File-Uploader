@@ -5,7 +5,7 @@ namespace WebApi.Infrastructure;
 
 /// <summary>
 /// P4.0 non-goals as startup policy. Fails fast when multi-instance is claimed
-/// without the architectural prerequisites.
+/// without the architectural prerequisites (shared metadata + shared part store).
 /// </summary>
 public static class MultiInstanceStartupGuard
 {
@@ -44,7 +44,8 @@ public static class MultiInstanceStartupGuard
             throw new InvalidOperationException(
                 "MultiInstance requires MultiInstance:SharedPartStoreConfigured=true. " +
                 "You must mount the same TempPath/FinalPath (or equivalent) on every API node. " +
-                "Sticky LB is not an acceptable substitute (NG2).");
+                "Sticky LB is not an acceptable substitute (NG2). " +
+                "Part layout is {{TempPath}}/{{uploadId}}/part/{{index}} (P4.2 D5).");
         }
 
         if (mi.ForbidExternalObjectStoreAsProductPlane &&
@@ -56,8 +57,13 @@ public static class MultiInstanceStartupGuard
                 "External S3 adapter is experimental only — set ForbidExternalObjectStoreAsProductPlane=false to override for lab.");
         }
 
+        // D6 — surface resolved paths so ops can confirm the shared mount.
+        var tempFull = Path.GetFullPath(storage.TempPath);
+        var finalFull = Path.GetFullPath(storage.FinalPath);
+
         logger.LogInformation(
-            "MultiInstance policy OK: Postgres metadata, SharedPartStoreConfigured=true, Provider={Provider}",
-            storage.Provider);
+            "MultiInstance policy OK: Postgres metadata, SharedPartStoreConfigured=true, Provider={Provider}, " +
+            "TempPath={TempPath}, FinalPath={FinalPath}, PartKey={{TempPath}}/{{uploadId}}/part/{{index}}",
+            storage.Provider, tempFull, finalFull);
     }
 }
