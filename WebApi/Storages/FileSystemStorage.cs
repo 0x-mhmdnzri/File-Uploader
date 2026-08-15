@@ -7,6 +7,12 @@ using WebApi.Interfaces;
 
 namespace WebApi.Storages;
 
+/// <summary>
+/// Own data-plane storage on a local or <b>shared</b> filesystem.
+/// Part layout (P4.2 / D5): <c>{TempPath}/{uploadId}/part/{index}</c>
+/// — stable, hierarchical, identical on every node that mounts the same volume.
+/// Merge and verify only use these helpers (D9: no node-local-only assumptions).
+/// </summary>
 public sealed class FileSystemStorage : IFileStorage, IDisposable
 {
     private readonly StorageOptions _options;
@@ -28,6 +34,28 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
 
     public void Dispose() => _diskGate.Dispose();
 
+    // -------------------------------------------------------------------------
+    // P4.2 D5 — Stable part key helpers (single source of truth for paths)
+    // Layout: {TempPath}/{uploadId}/part/{index}
+    // -------------------------------------------------------------------------
+
+    /// <summary>Session temp directory on the (possibly shared) volume.</summary>
+    private string SessionTempDir(Guid uploadId) =>
+        Path.Combine(_options.TempPath, uploadId.ToString("N"));
+
+    /// <summary>Directory that holds all parts for one upload.</summary>
+    private string PartDir(Guid uploadId) =>
+        Path.Combine(SessionTempDir(uploadId), "part");
+
+    /// <summary>
+    /// Stable part path: <c>{TempPath}/{uploadId}/part/{index}</c>.
+    /// Same key on every API node when TempPath is a shared mount (D6).
+    /// </summary>
+    private string PartPath(Guid uploadId, int chunkIndex) =>
+        Path.Combine(PartDir(uploadId), chunkIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    // -------------------------------------------------------------------------
+
     public Task EnsureDirectoriesAsync(CancellationToken ct = default)
     {
         Directory.CreateDirectory(_options.TempPath);
@@ -40,10 +68,9 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         await _diskGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var folder = Path.Combine(_options.TempPath, uploadId.ToString());
-            Directory.CreateDirectory(folder);
+            Directory.CreateDirectory(PartDir(uploadId));
 
-            var filePath = Path.Combine(folder, $"{uploadId}.part{chunkIndex}");
+            var filePath = PartPath(uploadId, chunkIndex);
 
             var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
             try
@@ -77,7 +104,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
 
     public Task DeleteChunkAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default)
     {
-        var path = Path.Combine(_options.TempPath, uploadId.ToString(), $"{uploadId}.part{chunkIndex}");
+        var path = PartPath(uploadId, chunkIndex);
         if (File.Exists(path))
             File.Delete(path);
         return Task.CompletedTask;
@@ -91,6 +118,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         int chunkSize,
         CancellationToken ct = default)
     {
+        // D9: merge only reads parts via PartPath — never a node-local scratch path.
         return _options.SinglePassMergeAndHash
             ? MergeSinglePassAsync(uploadId, fileName, totalChunks, totalSize, ct)
             : MergeParallelThenHashAsync(uploadId, fileName, totalChunks, totalSize, chunkSize, ct);
@@ -103,7 +131,6 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         long totalSize,
         CancellationToken ct)
     {
-        var folder = Path.Combine(_options.TempPath, uploadId.ToString());
         Directory.CreateDirectory(_options.FinalPath);
         var finalPath = ResolveFinalPath(uploadId, fileName);
 
@@ -129,7 +156,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                 for (var i = 0; i < totalChunks; i++)
                 {
                     ct.ThrowIfCancellationRequested();
-                    var partPath = Path.Combine(folder, $"{uploadId}.part{i}");
+                    var partPath = PartPath(uploadId, i);
                     if (!File.Exists(partPath))
                         throw new InvalidOperationException($"Missing chunk {i} for upload {uploadId}");
 
@@ -183,7 +210,6 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         int chunkSize,
         CancellationToken ct)
     {
-        var folder = Path.Combine(_options.TempPath, uploadId.ToString());
         Directory.CreateDirectory(_options.FinalPath);
         var finalPath = ResolveFinalPath(uploadId, fileName);
 
@@ -206,13 +232,12 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
             CancellationToken = ct
         };
 
-        // Capture first failure from workers (Parallel.ForEachAsync surfaces one).
         await Parallel.ForEachAsync(
             Enumerable.Range(0, totalChunks),
             options,
             async (i, token) =>
             {
-                var partPath = Path.Combine(folder, $"{uploadId}.part{i}");
+                var partPath = PartPath(uploadId, i);
                 if (!File.Exists(partPath))
                     throw new InvalidOperationException($"Missing chunk {i} for upload {uploadId}");
 
@@ -279,7 +304,6 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                 }
             }).ConfigureAwait(false);
 
-        // Post-condition: final length must match.
         var finalInfo = new FileInfo(finalPath);
         if (finalInfo.Length != totalSize)
         {
@@ -312,7 +336,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
 
     public Task DeleteTempFolderAsync(Guid uploadId, CancellationToken ct = default)
     {
-        var folder = Path.Combine(_options.TempPath, uploadId.ToString());
+        var folder = SessionTempDir(uploadId);
         if (Directory.Exists(folder))
             Directory.Delete(folder, recursive: true);
         return Task.CompletedTask;
@@ -327,32 +351,32 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
     }
 
     public Task<string> GetTempFolderAsync(Guid uploadId) =>
-        Task.FromResult(Path.Combine(_options.TempPath, uploadId.ToString()));
+        Task.FromResult(SessionTempDir(uploadId));
 
     public Task<bool> ChunkExistsAsync(Guid uploadId, int chunkIndex) =>
-        Task.FromResult(File.Exists(
-            Path.Combine(_options.TempPath, uploadId.ToString(), $"{uploadId}.part{chunkIndex}")));
+        Task.FromResult(File.Exists(PartPath(uploadId, chunkIndex)));
 
     public Task<IReadOnlyCollection<int>> GetExistingChunkIndexesAsync(Guid uploadId, CancellationToken ct = default)
     {
-        var folder = Path.Combine(_options.TempPath, uploadId.ToString());
-        if (!Directory.Exists(folder))
+        var dir = PartDir(uploadId);
+        if (!Directory.Exists(dir))
             return Task.FromResult<IReadOnlyCollection<int>>(Array.Empty<int>());
 
-        var prefix = $"{uploadId}.part";
         var indexes = new List<int>();
 
-        foreach (var file in Directory.EnumerateFiles(folder, $"{prefix}*"))
+        foreach (var file in Directory.EnumerateFiles(dir))
         {
             ct.ThrowIfCancellationRequested();
 
             var name = Path.GetFileName(file);
-            if (name is null || !name.StartsWith(prefix, StringComparison.Ordinal))
+            if (name is null)
                 continue;
 
-            var indexPart = name[prefix.Length..];
-            if (int.TryParse(indexPart, out var index) && index >= 0)
+            if (int.TryParse(name, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var index) && index >= 0)
+            {
                 indexes.Add(index);
+            }
         }
 
         return Task.FromResult<IReadOnlyCollection<int>>(indexes);
@@ -363,7 +387,6 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         int totalChunks,
         CancellationToken ct = default)
     {
-        var folder = Path.Combine(_options.TempPath, uploadId.ToString());
         var missing = new ConcurrentBag<int>();
         long bytesOnDisk = 0;
 
@@ -378,7 +401,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
             options,
             (i, token) =>
             {
-                var partPath = Path.Combine(folder, $"{uploadId}.part{i}");
+                var partPath = PartPath(uploadId, i);
                 if (!File.Exists(partPath))
                     missing.Add(i);
                 else
