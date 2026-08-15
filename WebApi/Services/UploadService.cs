@@ -169,7 +169,6 @@ public class UploadService : IUploadService
                 "Could not acquire complete lease (another node won CAS). Retry status shortly.");
         }
 
-        // Re-read after CAS for authoritative fields.
         session = await _repo.GetAsync(uploadId, ct)
                   ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
 
@@ -278,14 +277,30 @@ public class UploadService : IUploadService
         var session = await _repo.GetAsync(uploadId, ct)
                      ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
 
-        if (session.Status is UploadStatus.Completed or UploadStatus.Aborted)
+        if (session.Status is UploadStatus.Completed or UploadStatus.Aborted or UploadStatus.Expired)
             return;
 
         if (session.Status == UploadStatus.Completing)
             throw new InvalidOperationException("Cannot abort while complete/merge is in progress.");
 
-        session.Status = UploadStatus.Aborted;
-        await _repo.UpdateAsync(session, ct);
+        if (session.Status == UploadStatus.Failed)
+            return;
+
+        // P4.3: CAS Pending → Aborted so concurrent aborts across nodes are safe.
+        var won = await _repo.TryAbortAsync(uploadId, ct);
+        if (!won)
+        {
+            session = await _repo.GetAsync(uploadId, ct);
+            if (session is null || session.Status is UploadStatus.Aborted or UploadStatus.Completed
+                or UploadStatus.Expired or UploadStatus.Failed)
+                return;
+
+            if (session.Status == UploadStatus.Completing)
+                throw new InvalidOperationException("Cannot abort while complete/merge is in progress.");
+
+            throw new InvalidOperationException($"Cannot abort session in status {session.Status}");
+        }
+
         await _storage.DeleteTempFolderAsync(uploadId, ct);
         _receivedCache.Remove(uploadId);
         _sessionCache.Remove(uploadId);
@@ -310,7 +325,6 @@ public class UploadService : IUploadService
 
     public async Task<UploadSession?> GetStatusAsync(Guid uploadId, CancellationToken ct = default)
     {
-        // Prefer DB for multi-node correctness; refresh local hint cache.
         var session = await _repo.GetAsync(uploadId, ct);
         if (session is not null)
             _sessionCache.Set(session);
@@ -350,7 +364,6 @@ public class UploadService : IUploadService
 
     private async Task<UploadSession?> GetSessionHotAsync(Guid uploadId, CancellationToken ct)
     {
-        // Hint only: if cache miss or we need stronger checks, DB wins.
         if (_sessionCache.TryGet(uploadId, out var cached) &&
             cached.Status == UploadStatus.Pending &&
             !cached.IsExpired())
