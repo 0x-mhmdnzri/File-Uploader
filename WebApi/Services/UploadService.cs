@@ -134,7 +134,6 @@ public class UploadService : IUploadService
 
     public async Task<string> CompleteAsync(Guid uploadId, string? checksum = null, CancellationToken ct = default)
     {
-        // D4: never trust in-memory cache for complete — shared DB + storage are truth.
         _sessionCache.Remove(uploadId);
 
         var session = await _repo.GetAsync(uploadId, ct)
@@ -155,7 +154,6 @@ public class UploadService : IUploadService
         if (session.IsExpired())
             throw new InvalidOperationException($"Upload session {uploadId} has expired");
 
-        // D3: CAS Pending → Completing (only one API instance wins).
         var won = await _repo.TryBeginCompleteAsync(uploadId, ct);
         if (!won)
         {
@@ -194,6 +192,8 @@ public class UploadService : IUploadService
         }
 
         var expectedChecksum = NormalizeChecksum(checksum) ?? session.Checksum;
+        // Full-file SHA of multi-GB is the dominant complete cost — only when a client/session expects it.
+        var computeHash = expectedChecksum is not null;
 
         string finalPath;
         string actualChecksum;
@@ -205,6 +205,7 @@ public class UploadService : IUploadService
                 session.TotalChunks,
                 session.TotalSize,
                 session.ChunkSize,
+                computeHash,
                 ct);
         }
         catch (Exception ex)
@@ -239,7 +240,8 @@ public class UploadService : IUploadService
         }
 
         var finalName = Path.GetFileName(finalPath);
-        var finished = await _repo.TryFinishCompleteAsync(uploadId, finalName, actualChecksum, ct);
+        var checksumToStore = string.IsNullOrEmpty(actualChecksum) ? expectedChecksum : actualChecksum;
+        var finished = await _repo.TryFinishCompleteAsync(uploadId, finalName, checksumToStore, ct);
         if (!finished)
         {
             _logger.LogError(
@@ -255,15 +257,15 @@ public class UploadService : IUploadService
 
         session.Status = UploadStatus.Completed;
         session.FinalFileName = finalName;
-        session.Checksum = actualChecksum;
+        session.Checksum = checksumToStore;
         session.CompletedAt = DateTime.UtcNow;
 
         _audit.UploadCompleted(
             session.Id, session.FileName, finalName, session.TotalSize, session.ClientIp);
 
         _logger.LogInformation(
-            "Upload completed {UploadId} → {FinalFileName}",
-            session.Id, finalName);
+            "Upload completed {UploadId} → {FinalFileName} (hash={HashMode})",
+            session.Id, finalName, computeHash ? "computed" : "skipped");
 
         await SafePublishCompletedAsync(session, ct);
 
@@ -286,7 +288,6 @@ public class UploadService : IUploadService
         if (session.Status == UploadStatus.Failed)
             return;
 
-        // P4.3: CAS Pending → Aborted so concurrent aborts across nodes are safe.
         var won = await _repo.TryAbortAsync(uploadId, ct);
         if (!won)
         {
