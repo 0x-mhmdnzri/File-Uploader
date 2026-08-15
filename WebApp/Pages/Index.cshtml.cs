@@ -9,7 +9,8 @@ public class IndexModel : PageModel
 
     public IndexModel(IConfiguration cfg)
     {
-        ApiBase = cfg["ApiBase"] ?? "https://localhost:7013";
+        // Must match WebApi Properties/launchSettings.json "http" profile.
+        ApiBase = cfg["ApiBase"] ?? "http://localhost:5073";
         ApiKey = cfg["ApiKey"] ?? "";
     }
 
