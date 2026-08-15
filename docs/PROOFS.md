@@ -7,8 +7,9 @@ Evidence that multi-instance coordination works without sticky LB.
 | ID | Proof | How |
 |----|-------|-----|
 | **D16** | Happy path | `dotnet test` + `tools/proofs/http-proofs.sh` |
-| **D17** | Double complete | Parallel `TryBeginCompleteAsync` unit test + parallel HTTP complete |
-| **D18** | Chaos / cleanup | Parallel `TryClaimExpiredAsync` / `TryAbortAsync` unit tests |
+| **D17** | Double complete | Parallel CAS unit test + parallel HTTP complete |
+| **D18** | Chaos / cleanup | Parallel claim-expired / abort unit tests |
+| **CI** | Two real API processes | `docker-compose.multi.yml` + GitHub Actions |
 
 ---
 
@@ -18,46 +19,39 @@ Evidence that multi-instance coordination works without sticky LB.
 dotnet test tests/WebApi.Tests/WebApi.Tests.csproj -v n
 ```
 
-These use `InMemoryUploadRepository` with the same CAS contracts as `EfUploadRepository`:
-
-- Only **one** of N parallel `TryBeginCompleteAsync` wins
-- Only **one** `TryFinishCompleteAsync` wins
-- Only **one** `TryAbortAsync` / `TryClaimExpiredAsync` wins
-- Expired **Completing** sessions are claimable (stuck merger cleanup)
-
 ---
 
-## 2. HTTP proofs (API must be running)
+## 2. HTTP proofs (single process)
 
 ```bash
-# terminal 1
 dotnet run --project WebApi
-
-# terminal 2
 chmod +x tools/proofs/http-proofs.sh
 BASE=http://localhost:5073 ./tools/proofs/http-proofs.sh
 ```
 
-Optional two bases (true multi-node):
+---
+
+## 3. Two-process proof (shared volume + Postgres)
 
 ```bash
-BASE_A=http://node-a:5073 BASE_B=http://node-b:5073 ./tools/proofs/http-proofs.sh
+docker compose -f docker-compose.multi.yml up --build -d
+
+# wait until both ready
+curl -sf http://localhost:5073/health/ready | jq .
+curl -sf http://localhost:5075/health/ready | jq .
+
+BASE_A=http://localhost:5073 BASE_B=http://localhost:5075 ./tools/proofs/http-proofs.sh
+
+docker compose -f docker-compose.multi.yml down -v
 ```
 
-Covers:
+Both `api-a` and `api-b` mount the same `shared_data` volume and the same Postgres — no sticky LB required.
 
-1. Initiate → PUT chunks → complete → `status=Completed`
-2. Second PUT same chunk → `idempotent: true`
-3. Parallel complete on A and B → final status `Completed`, ≥1 HTTP 200
-4. `/health/live` and `/health/ready` Healthy
-
-Requires `curl` + `jq`.
+CI runs this path on every push to `dev`/`main` (`.github/workflows/proofs.yml`).
 
 ---
 
-## 3. Manual multi-node chaos checklist
-
-Prerequisites: Postgres, shared volume, `MultiInstance:Enabled=true`, two API processes, LB **without** affinity (or alternate `BASE_A` / `BASE_B` by hand).
+## 4. Manual multi-node chaos checklist
 
 | Step | Action | Expect |
 |------|--------|--------|
@@ -66,15 +60,15 @@ Prerequisites: Postgres, shared volume, `MultiInstance:Enabled=true`, two API pr
 | 3 | `GET status` on A and on B | same `received` set |
 | 4 | `POST complete` on A and B at once | one merge winner; status `Completed` |
 | 5 | Re-PUT an existing chunk | `idempotent: true` |
-| 6 | Stop readiness on A (unmount temp or kill DB path) | LB stops sending to A (`/health/ready` 503) |
-| 7 | Leave a session past TTL | only one node logs cleanup claim |
+| 6 | Break storage on A | `/health/ready` → 503 on A |
+| 7 | Session past TTL | only one node claims cleanup |
 
 ---
 
 ## Pass criteria
 
 - `dotnet test` — all green
-- `http-proofs.sh` — `FAIL=0`
-- Manual multi-node (if available) — table above holds without sticky sessions
+- `http-proofs.sh` — `FAIL=0` (single or dual base)
+- CI `multi-node-http` job green
 
-See also: [MULTI-INSTANCE.md](./MULTI-INSTANCE.md), [CLIENT-CONTRACT.md](./CLIENT-CONTRACT.md).
+See also: [MULTI-INSTANCE.md](./MULTI-INSTANCE.md), [CLIENT-CONTRACT.md](./CLIENT-CONTRACT.md), [OWNED-BLOB-NODES.md](./OWNED-BLOB-NODES.md).
