@@ -44,7 +44,14 @@ public class StorageOptions
     /// true = ordered single-pass merge+SHA (prefer when complete() hash dominates).
     /// false = parallel offset assemble then hash (prefer on fast SSD assemble-bound).
     /// </summary>
-    public bool SinglePassMergeAndHash { get; set; } = false;
+    public bool SinglePassMergeAndHash { get; set; } = true;
+
+    /// <summary>
+    /// When true (default), complete always computes full-file SHA-256 even if the client
+    /// did not send a checksum. Required for integrity under multi-instance / shared store.
+    /// Set false only for lab speed tests.
+    /// </summary>
+    public bool AlwaysComputeFullChecksum { get; set; } = true;
 
     public bool RequireChunkCrc32 { get; set; } = false;
     public bool RequireChunkSha256 { get; set; } = false;
