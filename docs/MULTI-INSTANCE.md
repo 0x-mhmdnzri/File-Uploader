@@ -129,6 +129,55 @@ Future design: dedicated blob nodes with an internal object API. Until then, sha
 
 ---
 
+## P4.3 — Thin distributed coordination
+
+**Principle:** no Redis/etcd lock service. Coordination is a thin layer of **database CAS** plus **idempotent I/O** on the shared part store.
+
+```mermaid
+flowchart LR
+  subgraph Nodes[API nodes]
+    A[Node A]
+    B[Node B]
+  end
+  DB[(Postgres CAS)]
+  FS[Shared volume
+  part keys]
+  A --> DB
+  B --> DB
+  A --> FS
+  B --> FS
+```
+
+### D10 — Idempotent chunk PUT
+
+`PUT /api/uploads/{id}/chunk/{index}`:
+
+1. Validates session is still `Pending`.
+2. If `ChunkExistsAsync` is true on the shared store → **200** with `{ idempotent: true }` (no rewrite).
+3. Otherwise write the part; concurrent double-write still ends as one object (`FileMode.Create` / object overwrite).
+
+Clients may retry freely across any node. Status listing always uses **disk listing**, not per-node memory.
+
+### D11 / D12 — Cluster-safe cleanup & abort
+
+| Operation | CAS | Winner does |
+|-----------|-----|-------------|
+| Orphan cleanup | `TryClaimExpiredAsync` — `(Pending\|Completing) + expired → Expired` | `DeleteTempFolderAsync` |
+| Abort | `TryAbortAsync` — `Pending → Aborted` | `DeleteTempFolderAsync` |
+| Complete (existing) | `TryBeginCompleteAsync` — `Pending → Completing` | merge + finish/fail CAS |
+
+Every node runs `OrphanCleanupService`. Only the CAS winner deletes parts for a given session; others skip (`claimed` / `skipped` counters in logs).
+
+Stuck `Completing` past `ExpiresAt` is claimable so a dead merger cannot leave parts forever.
+
+### What we deliberately do **not** lock
+
+- Per-chunk write leases (idempotent overwrite is enough).
+- Global cluster mutex for cleanup cycles (per-session CAS is enough).
+- Sticky routing as a substitute for shared store or CAS (NG2).
+
+---
+
 ## Minimal multi-node checklist
 
 1. Postgres for sessions (D1–D4).
@@ -137,6 +186,7 @@ Future design: dedicated blob nodes with an internal object API. Until then, sha
 4. `StorageOptions:Provider=FileSystem`.
 5. Load balancer **without** session affinity requirement (NG2).
 6. Wipe old temp folders after the D5 layout change.
+7. Rely on CAS + idempotent PUT (P4.3) — not in-process locks alone (NG1).
 
 ### Ops note
 
