@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Serilog;
 using WebApi.Audit;
 using WebApi.Auth;
@@ -115,9 +117,11 @@ try
 
     builder.Services.AddHostedService<OrphanCleanupService>();
 
+    // P4.4 — liveness vs readiness for load balancers
     builder.Services.AddHealthChecks()
-        .AddDbContextCheck<AppDbContext>("database")
-        .AddCheck<StorageHealthCheck>("storage");
+        .AddCheck("self", () => HealthCheckResult.Healthy("process up"), tags: ["live"])
+        .AddDbContextCheck<AppDbContext>("database", tags: ["ready"])
+        .AddCheck<StorageHealthCheck>("storage", tags: ["ready"]);
 
     builder.Services.AddCors(options =>
     {
@@ -173,7 +177,44 @@ try
     app.UseMiddleware<ApiKeyMiddleware>();
     app.MapControllers();
 
-    app.MapHealthChecks("/health");
+    // Liveness: process is running (no dependency checks) — k8s livenessProbe
+    app.MapHealthChecks("/health/live", new HealthCheckOptions
+    {
+        Predicate = r => r.Tags.Contains("live"),
+        ResponseWriter = HealthCheckResponseWriter.WriteAsync,
+        ResultStatusCodes =
+        {
+            [HealthStatus.Healthy] = StatusCodes.Status200OK,
+            [HealthStatus.Degraded] = StatusCodes.Status200OK,
+            [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable
+        }
+    });
+
+    // Readiness: Postgres + shared storage writable — LB / k8s readinessProbe
+    app.MapHealthChecks("/health/ready", new HealthCheckOptions
+    {
+        Predicate = r => r.Tags.Contains("ready"),
+        ResponseWriter = HealthCheckResponseWriter.WriteAsync,
+        ResultStatusCodes =
+        {
+            [HealthStatus.Healthy] = StatusCodes.Status200OK,
+            [HealthStatus.Degraded] = StatusCodes.Status503ServiceUnavailable,
+            [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable
+        }
+    });
+
+    // Aggregate (live + ready) for humans / monitoring
+    app.MapHealthChecks("/health", new HealthCheckOptions
+    {
+        ResponseWriter = HealthCheckResponseWriter.WriteAsync,
+        ResultStatusCodes =
+        {
+            [HealthStatus.Healthy] = StatusCodes.Status200OK,
+            [HealthStatus.Degraded] = StatusCodes.Status200OK,
+            [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable
+        }
+    });
+
     app.MapGet("/api/metrics", (IUploadMetrics metrics) => Results.Ok(metrics.Snapshot()));
 
     Log.Information(
