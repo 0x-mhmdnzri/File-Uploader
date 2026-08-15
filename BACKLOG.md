@@ -1,6 +1,6 @@
 # BACKLOG — File Uploader (own file service, S3-inspired)
 
-Last updated: 2026-08-15 (`dev`) — P4.3 D10–D12 done.
+Last updated: 2026-08-15 (`dev`) — P4.4 D13–D15 done.
 
 ---
 
@@ -33,16 +33,20 @@ Last updated: 2026-08-15 (`dev`) — P4.3 D10–D12 done.
 - [x] D11 CAS abort (`TryAbortAsync` Pending → Aborted)
 - [x] D12 Cluster-safe orphan cleanup (`TryClaimExpiredAsync` + winner deletes parts)
 
+### P4.4 Load balancer & client contract (D13–D15)
+- [x] D13 LB policy documented (no sticky required; ready-based pool)
+- [x] D14 `/health/live` + `/health/ready` (DB + storage tags)
+- [x] D15 Client contract (`docs/CLIENT-CONTRACT.md`) + `docs/PROXY.md` updates
+
 ---
 
 ## P4 remaining — next
 
-### P4.4–P4.5
+### P4.5 Proofs
 | ID | Task |
 |----|------|
-| D13–D15 | LB docs, readiness probes (shared volume + DB) |
-| D16–D18 | Chaos / happy / double-complete proof |
+| D16–D18 | Chaos / happy-path / double-complete proof scripts or runbook |
 
-**Next implement:** D13–D15 (LB + readiness).
+**Next implement:** D16–D18.
 
-See `docs/MULTI-INSTANCE.md`.
+See `docs/MULTI-INSTANCE.md`, `docs/PROXY.md`, `docs/CLIENT-CONTRACT.md`.
