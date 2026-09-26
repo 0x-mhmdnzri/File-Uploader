@@ -1,3 +1,4 @@
+using System.IO.Pipelines;
 namespace WebApi.Interfaces;
 
 public interface IFileStorage
@@ -11,6 +12,12 @@ public interface IFileStorage
     Task EnsureSessionDirectoriesAsync(Guid uploadId, CancellationToken ct = default);
 
     Task SaveChunkAsync(Guid uploadId, int chunkIndex, Stream data, CancellationToken ct = default);
+
+    /// <summary>
+    /// Zero-copy friendly path using <see cref="PipeReader"/> (perf 2.1).
+    /// Preferred when no decompression / tee is required.
+    /// </summary>
+    Task SaveChunkAsync(Guid uploadId, int chunkIndex, PipeReader reader, CancellationToken ct = default);
 
     Task DeleteChunkAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default);
 
