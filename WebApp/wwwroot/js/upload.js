@@ -14,13 +14,13 @@ window.uploaderInit = function (apiBase, apiKey) {
 
     if (!fileInput || !startBtn || !progressBar) return;
 
-    const CHUNK_SIZE = 16 * 1024 * 1024;
+    const CHUNK_SIZE = 32 * 1024 * 1024; // raised for higher bandwidth (perf 2.2)
     const MIN_WORKERS = 2;
-    const MAX_WORKERS_CAP = 6;
+    const MAX_WORKERS_CAP = 12; // raised adaptive ceiling (perf 3.1)
     const STORAGE_KEY = 'fileUploaderSession';
     /** WebCrypto one-shot ceiling (memory). Larger files stream in a Worker. */
     const WEBCYPTO_MAX = 512 * 1024 * 1024;
-    const HASH_SLICE = 16 * 1024 * 1024;
+    const HASH_SLICE = 32 * 1024 * 1024;
     const API_KEY = apiKey || '';
     const HAS_SUBTLE = !!(globalThis.crypto && crypto.subtle && crypto.subtle.digest);
 
