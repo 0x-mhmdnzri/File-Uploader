@@ -106,7 +106,7 @@ Key knobs already present in `StorageOptions`:
 
 ## 4. Multi-instance & storage backend (largest production bottleneck)
 
-- [ ] **4.1 Implement Owned Blob Nodes**  
+- [~] **4.1 Implement Owned Blob Nodes** — scaffold: IBlobNodeClient + HttpBlobNodeClient + resolver + config (adapter + host process still open)  
   Follow the design in `docs/OWNED-BLOB-NODES.md`.  
   Move from shared filesystem (NFS/EFS latency) to first-party blob nodes with local SSD.  
   *Effort: high · Risk: high (new component)*
@@ -140,7 +140,7 @@ Key knobs already present in `StorageOptions`:
   Ensure Serilog is asynchronous / sampling on the PUT and complete paths.  
   *Effort: low · Risk: low*
 
-- [ ] **5.4 Advanced Linux IO (io_uring etc.)**  
+- [ ] **5.4 Advanced Linux IO (io_uring etc.)** — **deferred / future**: only after local NVMe is proven IO-bound post 1.x–5.3  
   Only after the above items are exhausted and we are still IO-bound on local NVMe.  
   *Effort: high · Risk: high*
 
