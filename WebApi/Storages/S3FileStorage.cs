@@ -68,6 +68,8 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
 
     public Task EnsureDirectoriesAsync(CancellationToken ct = default) => Task.CompletedTask;
 
+    public Task EnsureSessionDirectoriesAsync(Guid uploadId, CancellationToken ct = default) => Task.CompletedTask; // S3 has no directories
+
     public async Task SaveChunkAsync(Guid uploadId, int chunkIndex, Stream data, CancellationToken ct = default)
     {
         await _diskGate.WaitAsync(ct).ConfigureAwait(false);
