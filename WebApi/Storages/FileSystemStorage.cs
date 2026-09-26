@@ -16,7 +16,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
     private readonly StorageOptions _options;
     private readonly IFileHasher _hasher;
     private readonly SemaphoreSlim _diskGate;
-    private const int BufferSize = 1 * 1024 * 1024;
+    private const int BufferSize = 4 * 1024 * 1024; // 4 MB — fewer syscalls on multi-GB uploads (perf 1.2)
 
     public FileSystemStorage(IOptions<StorageOptions> options, IFileHasher hasher)
     {
@@ -48,13 +48,19 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         return Task.CompletedTask;
     }
 
+    public Task EnsureSessionDirectoriesAsync(Guid uploadId, CancellationToken ct = default)
+    {
+        // Pre-create so the first chunk PUT does not pay mkdir on the hot path (perf 2.4)
+        Directory.CreateDirectory(PartDir(uploadId));
+        return Task.CompletedTask;
+    }
+
     public async Task SaveChunkAsync(Guid uploadId, int chunkIndex, Stream data, CancellationToken ct = default)
     {
         await _diskGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            Directory.CreateDirectory(PartDir(uploadId));
-
+            // Part directory is pre-created in EnsureSessionDirectoriesAsync (called from Initiate)
             var filePath = PartPath(uploadId, chunkIndex);
 
             var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
