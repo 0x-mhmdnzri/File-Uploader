@@ -115,7 +115,7 @@ Key knobs already present in `StorageOptions`:
   Intermediate step or complement to 4.1.  
   *Effort: high · Risk: high*
 
-- [ ] **4.3 Postgres tuning for CAS hot path**  
+- [x] **4.3 Postgres tuning for CAS hot path** — NoTracking default, EnableRetryOnFailure, (Id,Status) index, pool docs  
   Connection pool size, prepared statements, indexes on `(Status, Version)`, `ExecuteUpdateAsync` cost.  
   *Effort: low–medium · Risk: low*
 
