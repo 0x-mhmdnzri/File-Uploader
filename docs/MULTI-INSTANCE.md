@@ -250,3 +250,19 @@ Indexes used by CAS / status (see `AppDbContext`):
 - `(Id, Status)` composite
 - `(Status, ExpiresAt)` for orphan cleanup
 - `(Checksum, TotalSize, Status)` / fingerprint for dedupe
+
+
+## Optional Redis caches (perf 4.4)
+
+When `Redis:ConnectionString` is non-empty, `ISessionCache` and `IReceivedChunkCache` use Redis so all API nodes share hot-path hints. Disk remains the source of truth at complete.
+
+```json
+"Redis": {
+  "ConnectionString": "localhost:6379",
+  "KeyPrefix": "fu:",
+  "SessionTtlSeconds": 60,
+  "ReceivedChunksTtlSeconds": 600
+}
+```
+
+Leave `ConnectionString` empty for single-node / in-process caches (default).
