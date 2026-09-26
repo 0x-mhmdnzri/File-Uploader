@@ -125,6 +125,10 @@ try
 
     builder.Services.AddHostedService<OrphanCleanupService>();
 
+    // Async complete pipeline (perf 1.4)
+    builder.Services.AddSingleton<ICompleteJobQueue, ChannelCompleteJobQueue>();
+    builder.Services.AddHostedService<CompleteBackgroundService>();
+
     builder.Services.AddHealthChecks()
         .AddCheck("self", () => HealthCheckResult.Healthy("process up"), tags: ["live"])
         .AddDbContextCheck<AppDbContext>("database", tags: ["ready"])
