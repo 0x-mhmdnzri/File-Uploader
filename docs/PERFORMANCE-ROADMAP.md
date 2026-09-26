@@ -65,7 +65,7 @@ Key knobs already present in `StorageOptions`:
 
 ## 2. Chunk PUT path (hottest path during active upload)
 
-- [ ] **2.1 PipeReader / zero-copy body**  
+- [x] **2.1 PipeReader / zero-copy body**  
   Consume `HttpRequest.BodyReader` directly instead of a plain `Stream` in the controller → storage layer.  
   *Effort: medium · Risk: low–medium*
 
@@ -98,7 +98,7 @@ Key knobs already present in `StorageOptions`:
   Only enable gzip/br when CPU is free and measured bandwidth is the bottleneck.  
   *Effort: low · Risk: low*
 
-- [ ] **3.4 Clearer progress for server-side merge**  
+- [x] **3.4 Clearer progress for server-side merge**  
   After `complete` returns 202 / “Completing”, show a distinct “Merging & verifying…” state.  
   *Effort: low · Risk: none*
 
