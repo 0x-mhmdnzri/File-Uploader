@@ -27,8 +27,18 @@ public class StorageOptions
     public long MaxTotalStoredBytes { get; set; } = 200L * 1024 * 1024 * 1024;
     public long MaxStoredBytesPerIp { get; set; } = 50L * 1024 * 1024 * 1024;
 
+    /// <summary>
+    /// Max concurrent disk operations (chunk writes, merge reads/writes, verify).
+    /// Default 8 is conservative for shared/NFS volumes.
+    /// On local NVMe you can safely raise to 16–32 (or ProcessorCount * 2).
+    /// Set to 0 to auto-pick Clamp(ProcessorCount, 2, 16).
+    /// </summary>
     public int MaxConcurrentDiskIo { get; set; } = 8;
 
+    /// <summary>
+    /// Degree of parallelism used by the parallel merge path (when SinglePassMergeAndHash = false).
+    /// Also influences verify parallelism. Raise on fast local storage.
+    /// </summary>
     public int MergeParallelism { get; set; } = 4;
 
     public bool SinglePassMergeAndHash { get; set; } = true;
