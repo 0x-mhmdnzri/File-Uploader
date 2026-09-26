@@ -345,8 +345,36 @@ window.uploaderInit = function (apiBase, apiKey) {
             body: fd
         });
         const body = await r.json().catch(() => ({}));
+        // 202 Accepted = background merge (perf 1.4); 200 = finished synchronously
+        if (r.status === 202 || (body && body.status === 'Completing')) {
+            return { accepted: true, status: 'Completing', ...body };
+        }
         if (!r.ok) throw new Error(body.error || ('complete failed: ' + r.status));
         return body;
+    }
+
+    /** Poll /status until Completed / Failed or timeout (perf 3.4) */
+    async function waitForComplete(uploadId, timeoutMs = 30 * 60 * 1000) {
+        const start = Date.now();
+        let attempt = 0;
+        while (Date.now() - start < timeoutMs) {
+            if (cancelRequested) throw new Error('Cancelled while waiting for server merge');
+            const st = await apiStatus(uploadId);
+            if (!st) throw new Error('Session disappeared while completing');
+            if (st.status === 'Completed') return st;
+            if (st.status === 'Failed' || st.status === 'Aborted') {
+                throw new Error(`Server finished with status ${st.status}`);
+            }
+            // Completing or still Pending
+            attempt++;
+            const msg = st.status === 'Completing'
+                ? `Server merging & verifying… (${Math.floor((Date.now() - start) / 1000)}s)`
+                : `Waiting for server (${st.status})…`;
+            setStatus(msg);
+            setProgress(99, 'Server merge...');
+            await new Promise(r => setTimeout(r, Math.min(2000, 400 + attempt * 100)));
+        }
+        throw new Error('Timed out waiting for server merge/verify');
     }
 
     async function apiAbort(uploadId) {
@@ -488,9 +516,17 @@ window.uploaderInit = function (apiBase, apiKey) {
         setSpeed(null);
 
         const result = await apiComplete(uploadId, checksum || null);
-        clearSession();
-        setProgress(100, '100% — done');
-        setStatus('Completed: ' + (result.path || file.name));
+        if (result.accepted || result.status === 'Completing') {
+            // Background complete path (perf 1.4 / 3.4)
+            const final = await waitForComplete(uploadId);
+            clearSession();
+            setProgress(100, '100% — done');
+            setStatus('Completed: ' + (final.finalFileName || final.fileName || file.name));
+        } else {
+            clearSession();
+            setProgress(100, '100% — done');
+            setStatus('Completed: ' + (result.path || file.name));
+        }
         setState('done');
         currentUploadId = null;
     }
