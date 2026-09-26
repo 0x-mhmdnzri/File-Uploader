@@ -5,6 +5,7 @@ using WebApi.Domain.Events;
 using WebApi.Hashing;
 using WebApi.Interfaces;
 using WebApi.Metrics;
+using WebApi.Services;
 using WebApi.Storages;
 
 namespace WebApi.Services;
@@ -19,6 +20,7 @@ public class UploadService : IUploadService
     private readonly IAuditLogger _audit;
     private readonly StorageOptions _options;
     private readonly IUploadMetrics _metrics;
+    private readonly ICompleteJobQueue _completeQueue;
     private readonly ILogger<UploadService> _logger;
 
     public UploadService(
@@ -30,6 +32,7 @@ public class UploadService : IUploadService
         IAuditLogger audit,
         IOptions<StorageOptions> options,
         IUploadMetrics metrics,
+        ICompleteJobQueue completeQueue,
         ILogger<UploadService> logger)
     {
         _repo = repo;
@@ -40,6 +43,7 @@ public class UploadService : IUploadService
         _audit = audit;
         _options = options.Value;
         _metrics = metrics;
+        _completeQueue = completeQueue;
         _logger = logger;
     }
 
@@ -187,7 +191,7 @@ public class UploadService : IUploadService
         _metrics.RecordChunkUploaded();
     }
 
-    public async Task<string> CompleteAsync(Guid uploadId, string? checksum = null, CancellationToken ct = default)
+    public async Task<CompleteResult> CompleteAsync(Guid uploadId, string? checksum = null, CancellationToken ct = default)
     {
         _sessionCache.Remove(uploadId);
 
@@ -195,7 +199,7 @@ public class UploadService : IUploadService
                      ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
 
         if (session.Status == UploadStatus.Completed)
-            return session.FinalFileName ?? session.FileName;
+            return CompleteResult.Done(session.FinalFileName ?? session.FileName);
 
         if (session.Status == UploadStatus.Completing)
         {
@@ -216,7 +220,7 @@ public class UploadService : IUploadService
                       ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
 
             if (session.Status == UploadStatus.Completed)
-                return session.FinalFileName ?? session.FileName;
+                return CompleteResult.Done(session.FinalFileName ?? session.FileName);
 
             throw new InvalidOperationException(
                 "Could not acquire complete lease (another node won CAS). Retry status shortly.");
@@ -343,7 +347,13 @@ public class UploadService : IUploadService
 
         await SafePublishCompletedAsync(session, ct);
 
-        return finalPath;
+        return CompleteResult.Done(finalPath);
+    }
+
+    public async Task ProcessCompleteJobAsync(CompleteJob job, CancellationToken ct = default)
+    {
+        // Full background path will be wired in a follow-up; for now the request path remains synchronous.
+        await Task.CompletedTask;
     }
 
     public async Task AbortAsync(Guid uploadId, CancellationToken ct = default)
