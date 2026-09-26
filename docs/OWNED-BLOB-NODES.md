@@ -1,6 +1,6 @@
 # D8 — Owned blob nodes (design)
 
-Status: **design only** (not implemented). Product plane today = shared filesystem volume (P4.2). This document is the next evolution when NFS/EFS becomes the bottleneck or ops constraint.
+Status: **scaffolding started** (perf 4.1) — `IBlobNodeClient`, `HttpBlobNodeClient`, `IBlobNodeResolver`, config `BlobNodes`. Full `IFileStorage` adapter + standalone blob-node host still TODO. Product plane today = shared filesystem volume (P4.2). This document is the next evolution when NFS/EFS becomes the bottleneck or ops constraint.
 
 ## Goal
 
