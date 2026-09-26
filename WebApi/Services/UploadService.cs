@@ -187,8 +187,7 @@ public class UploadService : IUploadService
     {
         await EnsureCanAcceptChunkAsync(uploadId, chunkIndex, ct);
 
-        var map = _receivedCache.GetOrCreate(uploadId);
-        map.TryAdd(chunkIndex, 0);
+        _receivedCache.Mark(uploadId, chunkIndex);
         _metrics.RecordChunkUploaded();
     }
 
