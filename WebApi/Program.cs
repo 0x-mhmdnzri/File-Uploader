@@ -75,10 +75,22 @@ try
 
     builder.Services.AddDbContext<AppDbContext>(options =>
     {
+        // Reads dominate (status, CAS pre-checks); tracking only needed on explicit Update paths.
+        options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
+
         if (string.Equals(dbProvider, "Postgres", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(dbProvider, "PostgreSQL", StringComparison.OrdinalIgnoreCase))
         {
-            options.UseNpgsql(connectionString, npgsql => npgsql.MigrationsAssembly(migrationsAssembly));
+            options.UseNpgsql(connectionString, npgsql =>
+            {
+                npgsql.MigrationsAssembly(migrationsAssembly);
+                // Transient failure resilience for multi-instance CAS (perf 4.3)
+                npgsql.EnableRetryOnFailure(
+                    maxRetryCount: 5,
+                    maxRetryDelay: TimeSpan.FromSeconds(2),
+                    errorCodesToAdd: null);
+                npgsql.CommandTimeout(30);
+            });
         }
         else
         {
