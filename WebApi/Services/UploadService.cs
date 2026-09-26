@@ -203,8 +203,8 @@ public class UploadService : IUploadService
 
         if (session.Status == UploadStatus.Completing)
         {
-            throw new InvalidOperationException(
-                "Upload is already being completed on another node (or this node). Retry status shortly.");
+            // Already in progress — client should poll /status
+            return CompleteResult.Background();
         }
 
         if (session.Status != UploadStatus.Pending)
@@ -222,12 +222,51 @@ public class UploadService : IUploadService
             if (session.Status == UploadStatus.Completed)
                 return CompleteResult.Done(session.FinalFileName ?? session.FileName);
 
-            throw new InvalidOperationException(
-                "Could not acquire complete lease (another node won CAS). Retry status shortly.");
+            // Another node (or this one) holds the Completing lease
+            return CompleteResult.Background();
         }
 
-        session = await _repo.GetAsync(uploadId, ct)
-                  ?? throw new InvalidOperationException($"Upload session {uploadId} not found");
+        // Fast path: CAS acquired → enqueue heavy work and return 202 immediately (perf 1.4)
+        await _completeQueue.EnqueueAsync(
+            new CompleteJob(uploadId, checksum, DateTimeOffset.UtcNow), ct).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Complete job enqueued for {UploadId}; client should poll /status", uploadId);
+
+        return CompleteResult.Background();
+    }
+
+    /// <summary>
+    /// Runs verify → merge → hash → CAS finish off the request path.
+    /// Called by <c>CompleteBackgroundService</c>.
+    /// </summary>
+    public async Task ProcessCompleteJobAsync(CompleteJob job, CancellationToken ct = default)
+    {
+        var uploadId = job.UploadId;
+        var checksum = job.ClientChecksum;
+
+        _logger.LogInformation("Processing complete job for {UploadId}", uploadId);
+
+        var session = await _repo.GetAsync(uploadId, ct);
+        if (session is null)
+        {
+            _logger.LogWarning("Complete job for unknown session {UploadId}; skipping", uploadId);
+            return;
+        }
+
+        if (session.Status == UploadStatus.Completed)
+        {
+            _logger.LogInformation("Session {UploadId} already Completed; skipping job", uploadId);
+            return;
+        }
+
+        if (session.Status != UploadStatus.Completing)
+        {
+            _logger.LogWarning(
+                "Session {UploadId} is in status {Status}, expected Completing; skipping job",
+                uploadId, session.Status);
+            return;
+        }
 
         var (missing, bytesOnDisk) = await _storage.VerifyChunksParallelAsync(
             uploadId, session.TotalChunks, ct);
@@ -236,18 +275,29 @@ public class UploadService : IUploadService
         {
             await _repo.TryFailCompleteAsync(uploadId, session.Checksum, ct);
             _sessionCache.Remove(uploadId);
+            _receivedCache.Remove(uploadId);
+            _metrics.RecordFailed();
             var sample = missing.OrderBy(x => x).Take(20).ToArray();
-            throw new InvalidOperationException(
-                $"Not all chunks received. Expected {session.TotalChunks}, missing {missing.Count}. " +
-                $"Missing (sample): [{string.Join(", ", sample)}]");
+            _logger.LogWarning(
+                "Complete job {UploadId}: missing chunks (sample) [{Sample}]",
+                uploadId, string.Join(", ", sample));
+            _audit.UploadFailed(uploadId, session.FileName, "missing_chunks", session.ClientIp);
+            await SafePublishFailedAsync(session, "missing_chunks", ct);
+            return;
         }
 
         if (bytesOnDisk != session.TotalSize)
         {
             await _repo.TryFailCompleteAsync(uploadId, session.Checksum, ct);
             _sessionCache.Remove(uploadId);
-            throw new InvalidOperationException(
-                $"On-disk size mismatch. Expected {session.TotalSize} bytes, got {bytesOnDisk}.");
+            _receivedCache.Remove(uploadId);
+            _metrics.RecordFailed();
+            _logger.LogWarning(
+                "Complete job {UploadId}: size mismatch expected={Expected} got={Got}",
+                uploadId, session.TotalSize, bytesOnDisk);
+            _audit.UploadFailed(uploadId, session.FileName, "size_mismatch", session.ClientIp);
+            await SafePublishFailedAsync(session, "size_mismatch", ct);
+            return;
         }
 
         var expectedChecksum = NormalizeChecksum(checksum) ?? session.Checksum;
@@ -275,7 +325,7 @@ public class UploadService : IUploadService
             _metrics.RecordFailed();
             _audit.UploadFailed(uploadId, session.FileName, "merge_failed", session.ClientIp);
             await SafePublishFailedAsync(session, "merge_failed", ct);
-            throw;
+            return;
         }
 
         if (expectedChecksum is not null &&
@@ -286,16 +336,16 @@ public class UploadService : IUploadService
                 "Checksum mismatch for upload {UploadId}. Expected={Expected}, Actual={Actual}",
                 uploadId, expectedChecksum, actualChecksum);
 
-            await _storage.DeleteFinalFileAsync(Path.GetFileName(finalPath), ct);
+            try { await _storage.DeleteFinalFileAsync(Path.GetFileName(finalPath), ct); }
+            catch (Exception delEx) { _logger.LogWarning(delEx, "Failed to delete mismatched final for {UploadId}", uploadId); }
+
             await _repo.TryFailCompleteAsync(uploadId, actualChecksum, ct);
             _sessionCache.Remove(uploadId);
             _receivedCache.Remove(uploadId);
             _metrics.RecordFailed();
             _audit.UploadFailed(uploadId, session.FileName, "checksum_mismatch", session.ClientIp);
             await SafePublishFailedAsync(session, "checksum_mismatch", ct);
-
-            throw new InvalidOperationException(
-                $"Checksum mismatch. Expected {expectedChecksum}, got {actualChecksum}");
+            return;
         }
 
         var finalName = Path.GetFileName(finalPath);
@@ -324,8 +374,7 @@ public class UploadService : IUploadService
             _logger.LogError(
                 "CAS finish failed for {UploadId} after successful merge; manual check required. Path={Path}",
                 uploadId, finalPath);
-            throw new InvalidOperationException(
-                "Merge finished but metadata CAS to Completed failed. Inspect storage and session status.");
+            return;
         }
 
         _metrics.RecordCompleted(session.TotalSize);
@@ -346,14 +395,6 @@ public class UploadService : IUploadService
             session.Id, finalName, computeHash ? "computed" : "skipped", expectedChecksum is not null);
 
         await SafePublishCompletedAsync(session, ct);
-
-        return CompleteResult.Done(finalPath);
-    }
-
-    public async Task ProcessCompleteJobAsync(CompleteJob job, CancellationToken ct = default)
-    {
-        // Full background path will be wired in a follow-up; for now the request path remains synchronous.
-        await Task.CompletedTask;
     }
 
     public async Task AbortAsync(Guid uploadId, CancellationToken ct = default)
