@@ -30,18 +30,19 @@ try
         .ReadFrom.Services(services)
         .Enrich.FromLogContext()
         .Enrich.WithProperty("Application", "FileUploader.WebApi")
-        .WriteTo.Console()
-        .WriteTo.File(
+        // Async wrappers keep hot-path threads off disk IO (perf 5.3)
+        .WriteTo.Async(a => a.Console())
+        .WriteTo.Async(a => a.File(
             path: "logs/uploader-.log",
             rollingInterval: RollingInterval.Day,
             retainedFileCountLimit: 14,
-            shared: true)
-        .WriteTo.File(
+            shared: true))
+        .WriteTo.Async(a => a.File(
             path: "logs/audit-.log",
             rollingInterval: RollingInterval.Day,
             retainedFileCountLimit: 30,
             shared: true,
-            restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information));
+            restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information)));
 
     builder.Services.AddControllers();
     builder.Services.AddEndpointsApiExplorer();
@@ -202,6 +203,16 @@ try
     {
         opts.MessageTemplate =
             "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms";
+        // Demote noisy chunk PUT access logs to Debug (perf 5.3)
+        opts.GetLevel = (httpContext, elapsed, ex) =>
+        {
+            if (ex is not null) return Serilog.Events.LogEventLevel.Error;
+            var path = httpContext.Request.Path.Value ?? "";
+            if (path.Contains("/chunk/", StringComparison.OrdinalIgnoreCase))
+                return Serilog.Events.LogEventLevel.Debug;
+            if (elapsed > 1000) return Serilog.Events.LogEventLevel.Warning;
+            return Serilog.Events.LogEventLevel.Information;
+        };
     });
 
     if (app.Environment.IsDevelopment())
