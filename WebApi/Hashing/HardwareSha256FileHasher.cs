@@ -11,7 +11,7 @@ namespace WebApi.Hashing;
 /// </summary>
 public sealed class HardwareSha256FileHasher : IFileHasher
 {
-    private const int BufferSize = 4 * 1024 * 1024;
+    private const int BufferSize = 8 * 1024 * 1024; // 8 MB — fewer syscalls on multi-GB full-file hash (perf 1.2)
 
     public async Task<string> ComputeSha256Async(Stream data, CancellationToken ct = default)
     {
