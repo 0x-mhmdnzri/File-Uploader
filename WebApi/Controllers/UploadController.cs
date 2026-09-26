@@ -1,3 +1,4 @@
+using System.IO.Pipelines;
 using System.IO.Hashing;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Mvc;
@@ -166,7 +167,16 @@ public class UploadController : ControllerBase
             }
             else
             {
-                await _storage.SaveChunkAsync(uploadId, index, decoded, ct);
+                // Fast path: no decompression / integrity tee required → use PipeReader (perf 2.1)
+                // Note: when Content-Encoding is present we already went through the Stream path above.
+                if (string.IsNullOrWhiteSpace(encoding))
+                {
+                    await _storage.SaveChunkAsync(uploadId, index, Request.BodyReader, ct);
+                }
+                else
+                {
+                    await _storage.SaveChunkAsync(uploadId, index, decoded, ct);
+                }
             }
 
             await _service.MarkChunkReceivedAsync(uploadId, index, ct);
