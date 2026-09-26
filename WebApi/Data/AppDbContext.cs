@@ -48,11 +48,17 @@ public class AppDbContext : DbContext
         entity.Property(x => x.ClientIp)
             .HasMaxLength(64);
 
+        // Hot filters
         entity.HasIndex(x => x.Status);
         entity.HasIndex(x => x.ExpiresAt);
         entity.HasIndex(x => new { x.Status, x.ExpiresAt });
         entity.HasIndex(x => new { x.ClientIp, x.Status });
+        // Content-addressed dedupe lookups
         entity.HasIndex(x => new { x.Checksum, x.TotalSize, x.Status });
         entity.HasIndex(x => new { x.ContentFingerprint, x.TotalSize, x.Status });
+        // CAS complete path: WHERE Id = @id AND Status = Pending|Completing (perf 4.3)
+        // PK covers Id; composite with Status helps the filtered ExecuteUpdate plans on Postgres.
+        entity.HasIndex(x => new { x.Id, x.Status });
+        entity.HasIndex(x => x.FinalFileName);
     }
 }
