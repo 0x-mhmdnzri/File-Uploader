@@ -15,6 +15,9 @@ public interface IBlobNodeClient
 
     Task<bool> ExistsAsync(string key, CancellationToken ct = default);
 
+    /// <summary>HEAD size when object exists; null if missing.</summary>
+    Task<long?> TryGetSizeAsync(string key, CancellationToken ct = default);
+
     Task DeleteObjectAsync(string key, CancellationToken ct = default);
 
     Task<IReadOnlyList<string>> ListKeysAsync(string prefix, CancellationToken ct = default);
