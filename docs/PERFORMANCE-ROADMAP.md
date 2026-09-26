@@ -106,7 +106,7 @@ Key knobs already present in `StorageOptions`:
 
 ## 4. Multi-instance & storage backend (largest production bottleneck)
 
-- [~] **4.1 Implement Owned Blob Nodes** — scaffold: IBlobNodeClient + HttpBlobNodeClient + resolver + config (adapter + host process still open)  
+- [~] **4.1 Implement Owned Blob Nodes** — BlobNodeFileStorage + client/resolver/config done; standalone blob-node host process still TODO
   Follow the design in `docs/OWNED-BLOB-NODES.md`.  
   Move from shared filesystem (NFS/EFS latency) to first-party blob nodes with local SSD.  
   *Effort: high · Risk: high (new component)*
