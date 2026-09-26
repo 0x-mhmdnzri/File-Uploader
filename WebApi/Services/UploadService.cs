@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Options;
 using WebApi.Audit;
 using WebApi.Domain;
@@ -244,6 +245,7 @@ public class UploadService : IUploadService
     {
         var uploadId = job.UploadId;
         var checksum = job.ClientChecksum;
+        var sw = Stopwatch.StartNew();
 
         _logger.LogInformation("Processing complete job for {UploadId}", uploadId);
 
@@ -395,6 +397,7 @@ public class UploadService : IUploadService
             session.Id, finalName, computeHash ? "computed" : "skipped", expectedChecksum is not null);
 
         await SafePublishCompletedAsync(session, ct);
+        _metrics.RecordCompleteJobDuration(sw.Elapsed.TotalMilliseconds);
     }
 
     public async Task AbortAsync(Guid uploadId, CancellationToken ct = default)
