@@ -74,7 +74,7 @@ Key knobs already present in `StorageOptions`:
   Update `MaxChunkSizeBytes` and client defaults accordingly.  
   *Effort: low · Risk: low*
 
-- [ ] **2.3 Stronger part-existence cache**  
+- [x] **2.3 Stronger part-existence cache**  
   Improve `IReceivedChunkCache` hit-rate / TTL; consider a short-lived `ConcurrentDictionary` with sliding expiration.  
   *Effort: low · Risk: low*
 
