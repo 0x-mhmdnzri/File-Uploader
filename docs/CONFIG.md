@@ -83,3 +83,13 @@ MinIO: set `ServiceUrl` + `ForcePathStyle: true`. AWS: leave `ServiceUrl` empty.
 ```
 
 See `docs/PROXY.md`.
+
+
+## Integrity policy (`AlwaysComputeFullChecksum`)
+
+| Value | Meaning |
+|-------|---------|
+| `true` (default) | Complete **always** runs full-file SHA-256 on the server. Production safe. |
+| `false` | Digest is skipped unless the client sent a checksum. **Lab / StorageBench only.** |
+
+When `false`, the process logs a warning at startup. Never disable in multi-instance production — silent bit-rot acceptance is the failure mode.
