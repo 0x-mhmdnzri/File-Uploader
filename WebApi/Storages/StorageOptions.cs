@@ -44,7 +44,16 @@ public class StorageOptions
     public bool SinglePassMergeAndHash { get; set; } = true;
 
     /// <summary>
-    /// When true (default), complete always computes full-file SHA-256.
+    /// When true (default), complete always computes full-file SHA-256 on the server.
+    /// This is the production integrity guarantee — content is never accepted as Completed
+    /// without a server-side digest.
+    /// <para>
+    /// Set to <c>false</c> only in lab / StorageBench scenarios to skip the digest for
+    /// pure throughput measurement. Never disable in multi-instance production:
+    /// bit-flips and truncated parts would be silently accepted.
+    /// </para>
+    /// When false, a digest is still computed if the client supplied a checksum
+    /// (so client/server cross-check remains available).
     /// </summary>
     public bool AlwaysComputeFullChecksum { get; set; } = true;
 
