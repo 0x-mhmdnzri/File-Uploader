@@ -50,7 +50,7 @@ Key knobs already present in `StorageOptions`:
   Especially useful when `SinglePassMergeAndHash = false`.  
   *Effort: medium · Risk: medium (platform differences)*
 
-- [~] **1.4 Async / background Complete** (scaffolding landed: queue + background service + CompleteResult + 202 controller; heavy work still on request path — full extraction next)  
+- [x] **1.4 Async / background Complete** — CAS + enqueue on request path; verify/merge/hash runs in CompleteBackgroundService; controller returns 202; client polls
   Make `POST /complete` only acquire the CAS lease and enqueue a background job (Channel / `IHostedService`).  
   Return `202 Accepted` + status URL immediately. Client polls or receives webhook.  
   Biggest UX win for multi-GB files.  
