@@ -1,3 +1,4 @@
+using System.IO.Pipelines;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Net;
@@ -69,6 +70,16 @@ public sealed class S3FileStorage : IFileStorage, IDisposable
     public Task EnsureDirectoriesAsync(CancellationToken ct = default) => Task.CompletedTask;
 
     public Task EnsureSessionDirectoriesAsync(Guid uploadId, CancellationToken ct = default) => Task.CompletedTask; // S3 has no directories
+
+    public async Task SaveChunkAsync(Guid uploadId, int chunkIndex, PipeReader reader, CancellationToken ct = default)
+    {
+        // S3 path: materialize to a temporary stream (PipeReader overload mainly benefits FileSystem)
+        await using var ms = new MemoryStream();
+        await reader.CopyToAsync(ms, ct).ConfigureAwait(false);
+        await reader.CompleteAsync().ConfigureAwait(false);
+        ms.Position = 0;
+        await SaveChunkAsync(uploadId, chunkIndex, ms, ct).ConfigureAwait(false);
+    }
 
     public async Task SaveChunkAsync(Guid uploadId, int chunkIndex, Stream data, CancellationToken ct = default)
     {
