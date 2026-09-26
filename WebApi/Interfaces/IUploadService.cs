@@ -1,4 +1,5 @@
 using WebApi.Domain;
+using WebApi.Services;
 
 namespace WebApi.Interfaces;
 
@@ -22,7 +23,17 @@ public interface IUploadService
 
     Task MarkChunkReceivedAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default);
 
-    Task<string> CompleteAsync(Guid uploadId, string? checksum = null, CancellationToken ct = default);
+    /// <summary>
+    /// Acquires the CAS complete lease and enqueues the heavy merge+hash work
+    /// to <see cref="CompleteBackgroundService"/> (perf 1.4). Returns quickly with
+    /// <see cref="CompleteResult.AcceptedForBackground"/> = true.
+    /// </summary>
+    Task<CompleteResult> CompleteAsync(Guid uploadId, string? checksum = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Called by the background worker after a job is dequeued.
+    /// </summary>
+    Task ProcessCompleteJobAsync(CompleteJob job, CancellationToken ct = default);
 
     Task AbortAsync(Guid uploadId, CancellationToken ct = default);
 
