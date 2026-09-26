@@ -69,7 +69,7 @@ Key knobs already present in `StorageOptions`:
   Consume `HttpRequest.BodyReader` directly instead of a plain `Stream` in the controller → storage layer.  
   *Effort: medium · Risk: low–medium*
 
-- [ ] **2.2 Larger default / adaptive chunk size**  
+- [x] **2.2 Larger default / adaptive chunk size**  
   Allow client + server to negotiate or config 32–64 MB chunks on high-bandwidth links.  
   Update `MaxChunkSizeBytes` and client defaults accordingly.  
   *Effort: low · Risk: low*
@@ -86,7 +86,7 @@ Key knobs already present in `StorageOptions`:
 
 ## 3. Client (`WebApp/wwwroot/js/upload.js`)
 
-- [ ] **3.1 Higher adaptive worker ceiling**  
+- [x] **3.1 Higher adaptive worker ceiling**  
   Raise max workers from 6 → 12–16 and improve the throughput/RTT adaptive logic.  
   *Effort: low–medium · Risk: low (server must tolerate the extra concurrency)*
 
