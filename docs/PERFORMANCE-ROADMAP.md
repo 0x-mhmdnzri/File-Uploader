@@ -127,11 +127,11 @@ Key knobs already present in `StorageOptions`:
 
 ## 5. Infrastructure & observability
 
-- [ ] **5.1 Kestrel tuning**  
+- [x] **5.1 Kestrel tuning** — concurrent limits, HTTP/2 windows, keep-alive, body size  
   Explicit limits, KeepAlive, HTTP/2 settings, `MaxRequestBodySize`.  
   *Effort: low · Risk: low*
 
-- [ ] **5.2 Richer metrics + expand StorageBench**  
+- [x] **5.2 Richer metrics + expand StorageBench** — chunk PUT + complete-job histograms with p50/p95 on /api/metrics  
   Separate histograms for PUT latency, Verify, Merge, Hash.  
   Record p50 / p95 in `docs/BENCH.md`.  
   *Effort: low · Risk: none*
