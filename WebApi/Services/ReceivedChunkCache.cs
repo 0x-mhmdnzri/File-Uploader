@@ -56,6 +56,11 @@ public sealed class ReceivedChunkCache : IReceivedChunkCache
         return true;
     }
 
+    public void Mark(Guid uploadId, int chunkIndex)
+    {
+        GetOrCreate(uploadId).TryAdd(chunkIndex, 0);
+    }
+
     public void Remove(Guid uploadId) => _maps.TryRemove(uploadId, out _);
 
     private void EvictIfNeeded()
