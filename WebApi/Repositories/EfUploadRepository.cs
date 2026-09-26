@@ -28,7 +28,7 @@ public class EfUploadRepository : IUploadRepository
 
     public async Task UpdateAsync(UploadSession session, CancellationToken ct = default)
     {
-        var tracked = await _db.UploadSessions.FirstOrDefaultAsync(x => x.Id == session.Id, ct)
+        var tracked = await _db.UploadSessions.AsTracking().FirstOrDefaultAsync(x => x.Id == session.Id, ct)
                       ?? throw new InvalidOperationException($"Session {session.Id} not found");
 
         if (tracked.Version != session.Version)
@@ -55,7 +55,7 @@ public class EfUploadRepository : IUploadRepository
 
     public async Task DeleteAsync(UploadSession session, CancellationToken ct = default)
     {
-        var tracked = await _db.UploadSessions.FirstOrDefaultAsync(x => x.Id == session.Id, ct);
+        var tracked = await _db.UploadSessions.AsTracking().FirstOrDefaultAsync(x => x.Id == session.Id, ct);
         if (tracked is null)
             return;
 
