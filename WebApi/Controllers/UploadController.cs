@@ -203,8 +203,16 @@ public class UploadController : ControllerBase
 
         try
         {
-            var finalPath = await _service.CompleteAsync(uploadId, checksum, ct);
-            return Ok(new { path = finalPath });
+            var result = await _service.CompleteAsync(uploadId, checksum, ct);
+            if (result.AcceptedForBackground)
+            {
+                // 202 + Location so clients can poll /status while merge+hash runs (perf 1.4)
+                return AcceptedAtAction(
+                    nameof(Status),
+                    new { uploadId },
+                    new { status = result.Status, message = "Merge and integrity check accepted; poll status." });
+            }
+            return Ok(new { path = result.FinalPath, status = result.Status });
         }
         catch (InvalidOperationException ex)
         {
