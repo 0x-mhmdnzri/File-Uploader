@@ -225,3 +225,28 @@ Summary:
 ### Ops note
 
 Lab SQLite DBs from before `Version` / `Completing` may need wipe; `EnsureCreated` does not migrate.
+
+
+## Postgres tuning for CAS hot path (perf 4.3)
+
+CAS operations (`TryBeginCompleteAsync`, `TryFinishCompleteAsync`, abort/expire) are single-row `UPDATE … WHERE Id = @id AND Status = @status` via EF `ExecuteUpdateAsync`.
+
+Recommended connection string extras (Npgsql):
+
+```
+Host=...;Database=uploads;Username=...;Password=...;Maximum Pool Size=50;Minimum Pool Size=5;Timeout=15;Command Timeout=30;No Reset On Close=true
+```
+
+| Setting | Why |
+|---------|-----|
+| `Maximum Pool Size` | Match concurrent complete + status load under the LB |
+| `Minimum Pool Size` | Avoid cold-connect latency on burst |
+| `EnableRetryOnFailure` | Enabled in code (5 retries, 2s max delay) for transient errors |
+| `QueryTrackingBehavior.NoTracking` | Default in code; update paths use explicit `AsTracking()` |
+
+Indexes used by CAS / status (see `AppDbContext`):
+
+- PK on `Id`
+- `(Id, Status)` composite
+- `(Status, ExpiresAt)` for orphan cleanup
+- `(Checksum, TotalSize, Status)` / fingerprint for dedupe
