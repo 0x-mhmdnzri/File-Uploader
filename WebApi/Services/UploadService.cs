@@ -142,6 +142,10 @@ public class UploadService : IUploadService
         };
 
         await _repo.AddAsync(session, ct);
+
+        // Pre-create part directory so the first chunk PUT avoids mkdir on the hot path (perf 2.4)
+        await _storage.EnsureSessionDirectoriesAsync(session.Id, ct);
+
         _receivedCache.GetOrCreate(session.Id);
         _sessionCache.Set(session);
         _metrics.RecordInitiated();
