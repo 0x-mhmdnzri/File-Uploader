@@ -1,3 +1,5 @@
+using WebApi.Metrics;
+using System.Diagnostics;
 using System.IO.Pipelines;
 using System.IO.Hashing;
 using System.Security.Cryptography;
@@ -14,17 +16,20 @@ namespace WebApi.Controllers;
 public class UploadController : ControllerBase
 {
     private readonly IUploadService _service;
+    private readonly IUploadMetrics? _metrics;
     private readonly IFileStorage _storage;
     private readonly StorageOptions _options;
 
     public UploadController(
         IUploadService service,
         IFileStorage storage,
-        IOptions<StorageOptions> options)
+        IOptions<StorageOptions> options,
+        IUploadMetrics? metrics = null)
     {
         _service = service;
         _storage = storage;
         _options = options.Value;
+        _metrics = metrics;
     }
 
     /// <summary>
@@ -95,6 +100,7 @@ public class UploadController : ControllerBase
         [FromRoute] int index,
         CancellationToken ct = default)
     {
+        var sw = Stopwatch.StartNew();
         try
         {
             await _service.EnsureCanAcceptChunkAsync(uploadId, index, ct);
@@ -102,6 +108,7 @@ public class UploadController : ControllerBase
             if (await _storage.ChunkExistsAsync(uploadId, index))
             {
                 await _service.MarkChunkReceivedAsync(uploadId, index, ct);
+                _metrics?.RecordChunkPutDuration(sw.Elapsed.TotalMilliseconds);
                 return Ok(new { idempotent = true, chunkIndex = index });
             }
 
@@ -180,6 +187,7 @@ public class UploadController : ControllerBase
             }
 
             await _service.MarkChunkReceivedAsync(uploadId, index, ct);
+            _metrics?.RecordChunkPutDuration(sw.Elapsed.TotalMilliseconds);
             return Ok(new { idempotent = false, chunkIndex = index });
         }
         catch (InvalidOperationException ex)
