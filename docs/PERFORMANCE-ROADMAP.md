@@ -136,7 +136,7 @@ Key knobs already present in `StorageOptions`:
   Record p50 / p95 in `docs/BENCH.md`.  
   *Effort: low · Risk: none*
 
-- [ ] **5.3 Reduce logging cost on hot path**  
+- [x] **5.3 Reduce logging cost on hot path** — async Serilog sinks, chunk PUT request logs at Debug, tighter overrides  
   Ensure Serilog is asynchronous / sampling on the PUT and complete paths.  
   *Effort: low · Risk: low*
 
