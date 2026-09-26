@@ -54,6 +54,15 @@ public sealed class HttpBlobNodeClient : IBlobNodeClient
         return res.IsSuccessStatusCode;
     }
 
+    public async Task<long?> TryGetSizeAsync(string key, CancellationToken ct = default)
+    {
+        var res = await _http.SendAsync(
+                new HttpRequestMessage(HttpMethod.Head, $"/v1/objects/{Uri.EscapeDataString(key)}"), ct)
+            .ConfigureAwait(false);
+        if (!res.IsSuccessStatusCode) return null;
+        return res.Content.Headers.ContentLength;
+    }
+
     public async Task DeleteObjectAsync(string key, CancellationToken ct = default)
     {
         var res = await _http.DeleteAsync($"/v1/objects/{Uri.EscapeDataString(key)}", ct)
