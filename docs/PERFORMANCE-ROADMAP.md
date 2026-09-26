@@ -56,7 +56,7 @@ Key knobs already present in `StorageOptions`:
   Biggest UX win for multi-GB files.  
   *Effort: medium–high · Risk: medium (need clear state machine for Completing → Completed/Failed)*
 
-- [ ] **1.5 Optional skip / lazy full SHA-256**  
+- [x] **1.5 Optional skip / lazy full SHA-256** — documented lab-only escape + startup warning when disabled; production default remains true  
   Keep `AlwaysComputeFullChecksum = true` as production default.  
   Add a documented lab-only escape hatch + optional Merkle-tree / part-hash verification for trusted environments.  
   *Effort: low · Risk: high if misused in production*
