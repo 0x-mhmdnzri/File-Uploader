@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Threading;
+using System.IO.MemoryMappedFiles;
 using Microsoft.Extensions.Options;
 using WebApi.Interfaces;
 
@@ -16,7 +17,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
     private readonly StorageOptions _options;
     private readonly IFileHasher _hasher;
     private readonly SemaphoreSlim _diskGate;
-    private const int BufferSize = 4 * 1024 * 1024; // 4 MB — fewer syscalls on multi-GB uploads (perf 1.2)
+    private const int BufferSize = 1 * 1024 * 1024;
 
     public FileSystemStorage(IOptions<StorageOptions> options, IFileHasher hasher)
     {
@@ -48,19 +49,13 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         return Task.CompletedTask;
     }
 
-    public Task EnsureSessionDirectoriesAsync(Guid uploadId, CancellationToken ct = default)
-    {
-        // Pre-create so the first chunk PUT does not pay mkdir on the hot path (perf 2.4)
-        Directory.CreateDirectory(PartDir(uploadId));
-        return Task.CompletedTask;
-    }
-
     public async Task SaveChunkAsync(Guid uploadId, int chunkIndex, Stream data, CancellationToken ct = default)
     {
         await _diskGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // Part directory is pre-created in EnsureSessionDirectoriesAsync (called from Initiate)
+            Directory.CreateDirectory(PartDir(uploadId));
+
             var filePath = PartPath(uploadId, chunkIndex);
 
             var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
@@ -208,6 +203,7 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         Directory.CreateDirectory(_options.FinalPath);
         var finalPath = ResolveFinalPath(uploadId, fileName);
 
+        // Pre-allocate the final file so MemoryMappedFile can map the full range.
         await using (var pre = new FileStream(
                          finalPath,
                          FileMode.Create,
@@ -221,83 +217,89 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
         }
 
         var parallelism = Math.Max(1, _options.MergeParallelism);
-        var options = new ParallelOptions
+        var parallelOptions = new ParallelOptions
         {
             MaxDegreeOfParallelism = parallelism,
             CancellationToken = ct
         };
 
-        await Parallel.ForEachAsync(
-            Enumerable.Range(0, totalChunks),
-            options,
-            async (i, token) =>
-            {
-                var partPath = PartPath(uploadId, i);
-                if (!File.Exists(partPath))
-                    throw new InvalidOperationException($"Missing chunk {i} for upload {uploadId}");
-
-                var offset = (long)i * chunkSize;
-                var partLen = new FileInfo(partPath).Length;
-                var expectedLen = i == totalChunks - 1
-                    ? totalSize - offset
-                    : chunkSize;
-
-                if (partLen != expectedLen)
+        // Memory-mapped parallel merge (perf 1.3): one mapping, many concurrent view streams.
+        // Significantly reduces FileStream open/seek overhead on large multi-GB objects.
+        using (var mmf = MemoryMappedFile.CreateFromFile(
+                   finalPath,
+                   FileMode.Open,
+                   mapName: null,
+                   capacity: totalSize,
+                   access: MemoryMappedFileAccess.ReadWrite))
+        {
+            await Parallel.ForEachAsync(
+                Enumerable.Range(0, totalChunks),
+                parallelOptions,
+                async (i, token) =>
                 {
-                    throw new InvalidOperationException(
-                        $"Chunk {i} length {partLen} != expected {expectedLen}.");
-                }
+                    var partPath = PartPath(uploadId, i);
+                    if (!File.Exists(partPath))
+                        throw new InvalidOperationException($"Missing chunk {i} for upload {uploadId}");
 
-                await _diskGate.WaitAsync(token).ConfigureAwait(false);
-                try
-                {
-                    var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+                    var offset = (long)i * chunkSize;
+                    var partLen = new FileInfo(partPath).Length;
+                    var expectedLen = i == totalChunks - 1
+                        ? totalSize - offset
+                        : chunkSize;
+
+                    if (partLen != expectedLen)
+                    {
+                        throw new InvalidOperationException(
+                            $"Chunk {i} length {partLen} != expected {expectedLen}.");
+                    }
+
+                    await _diskGate.WaitAsync(token).ConfigureAwait(false);
                     try
                     {
-                        await using var partFs = new FileStream(
-                            partPath,
-                            FileMode.Open,
-                            FileAccess.Read,
-                            FileShare.Read,
-                            bufferSize: BufferSize,
-                            options: FileOptions.Asynchronous | FileOptions.SequentialScan);
-
-                        await using var finalFs = new FileStream(
-                            finalPath,
-                            FileMode.Open,
-                            FileAccess.Write,
-                            FileShare.ReadWrite,
-                            bufferSize: BufferSize,
-                            options: FileOptions.Asynchronous | FileOptions.RandomAccess);
-
-                        finalFs.Seek(offset, SeekOrigin.Begin);
-
-                        long copied = 0;
-                        int read;
-                        while ((read = await partFs.ReadAsync(buffer.AsMemory(0, BufferSize), token).ConfigureAwait(false)) > 0)
+                        var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+                        try
                         {
-                            await finalFs.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
-                            copied += read;
+                            await using var partFs = new FileStream(
+                                partPath,
+                                FileMode.Open,
+                                FileAccess.Read,
+                                FileShare.Read,
+                                bufferSize: BufferSize,
+                                options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+                            // Write directly into the memory-mapped view for this chunk's range.
+                            await using var view = mmf.CreateViewStream(
+                                offset,
+                                partLen,
+                                MemoryMappedFileAccess.Write);
+
+                            long copied = 0;
+                            int read;
+                            while ((read = await partFs.ReadAsync(buffer.AsMemory(0, BufferSize), token).ConfigureAwait(false)) > 0)
+                            {
+                                await view.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+                                copied += read;
+                            }
+
+                            await view.FlushAsync(token).ConfigureAwait(false);
+
+                            if (copied != partLen)
+                            {
+                                throw new InvalidOperationException(
+                                    $"Chunk {i} short write: copied {copied}, part length {partLen}.");
+                            }
                         }
-
-                        await finalFs.FlushAsync(token).ConfigureAwait(false);
-
-                        if (copied != partLen)
+                        finally
                         {
-                            throw new InvalidOperationException(
-                                $"Chunk {i} short write: copied {copied}, part length {partLen}.");
+                            ArrayPool<byte>.Shared.Return(buffer);
                         }
                     }
                     finally
                     {
-                        ArrayPool<byte>.Shared.Return(buffer);
+                        _diskGate.Release();
                     }
-                }
-                finally
-                {
-                    _diskGate.Release();
-                }
-            }).ConfigureAwait(false);
+                }).ConfigureAwait(false);
+        } // dispose MMF → flush mapping to disk
 
         var finalInfo = new FileInfo(finalPath);
         if (finalInfo.Length != totalSize)
