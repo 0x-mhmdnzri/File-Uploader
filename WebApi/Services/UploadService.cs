@@ -231,7 +231,7 @@ public class UploadService : IUploadService
         await _completeQueue.EnqueueAsync(
             new CompleteJob(uploadId, checksum, DateTimeOffset.UtcNow), ct).ConfigureAwait(false);
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "Complete job enqueued for {UploadId}; client should poll /status", uploadId);
 
         return CompleteResult.Background();
@@ -247,7 +247,7 @@ public class UploadService : IUploadService
         var checksum = job.ClientChecksum;
         var sw = Stopwatch.StartNew();
 
-        _logger.LogInformation("Processing complete job for {UploadId}", uploadId);
+        _logger.LogDebug("Processing complete job for {UploadId}", uploadId);
 
         var session = await _repo.GetAsync(uploadId, ct);
         if (session is null)
