@@ -119,7 +119,7 @@ Key knobs already present in `StorageOptions`:
   Connection pool size, prepared statements, indexes on `(Status, Version)`, `ExecuteUpdateAsync` cost.  
   *Effort: low–medium · Risk: low*
 
-- [ ] **4.4 Optional Redis for SessionCache / ReceivedChunkCache**  
+- [x] **4.4 Optional Redis for SessionCache / ReceivedChunkCache** — enabled when Redis:ConnectionString is set  
   Only when multi-instance is enabled and in-memory cache becomes a problem.  
   *Effort: medium · Risk: medium*
 
