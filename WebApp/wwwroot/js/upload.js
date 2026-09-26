@@ -17,6 +17,12 @@ window.uploaderInit = function (apiBase, apiKey) {
     const CHUNK_SIZE = 32 * 1024 * 1024; // raised for higher bandwidth (perf 2.2)
     const MIN_WORKERS = 2;
     const MAX_WORKERS_CAP = 12; // raised adaptive ceiling (perf 3.1)
+
+    // Adaptive per-chunk compression (perf 3.3): enable when bandwidth is the bottleneck
+    // and the payload looks compressible. Skip obvious already-compressed types.
+    const COMPRESS_MIME_SKIP = /^(image\/(jpeg|png|gif|webp|avif)|video\/|audio\/|application\/(zip|gzip|x-gzip|x-rar|pdf|octet-stream))/i;
+    let compressionEnabled = false; // toggled by adaptWorkers from measured MB/s
+
     const STORAGE_KEY = 'fileUploaderSession';
     /** WebCrypto one-shot ceiling (memory). Larger files stream in a Worker. */
     const WEBCYPTO_MAX = 512 * 1024 * 1024;
@@ -306,6 +312,7 @@ window.uploaderInit = function (apiBase, apiKey) {
         const r = await fetch(`${apiBase}/api/uploads/initiate`, {
             method: 'POST',
             headers: authHeaders(),
+            keepalive: true,
             body: fd
         });
         const body = await r.json().catch(() => ({}));
@@ -313,20 +320,43 @@ window.uploaderInit = function (apiBase, apiKey) {
         return body;
     }
 
-    async function apiUploadChunk(uploadId, index, blob) {
-        const headers = authHeaders();
-        let body = blob;
+    async function maybeCompressChunk(blob, fileMime) {
+        if (!compressionEnabled) return { body: blob, encoding: null };
+        if (typeof CompressionStream === 'undefined') return { body: blob, encoding: null };
+        if (fileMime && COMPRESS_MIME_SKIP.test(fileMime)) return { body: blob, encoding: null };
 
+        try {
+            const stream = blob.stream().pipeThrough(new CompressionStream('gzip'));
+            const compressed = await new Response(stream).blob();
+            // Only use gzip if we actually saved bytes (avoid CPU waste on incompressible data)
+            if (compressed.size < blob.size * 0.95) {
+                return { body: compressed, encoding: 'gzip' };
+            }
+        } catch (_) { /* fall through to raw */ }
+        return { body: blob, encoding: null };
+    }
+
+    async function apiUploadChunk(uploadId, index, blob, fileMime) {
+        const headers = authHeaders();
+        // HTTP/2 friendly: keepalive reuses the connection (perf 3.2)
+        const fetchOpts = { method: 'PUT', keepalive: true };
+
+        let body = blob;
         if (requireChunkCrc32 || requireChunkSha256) {
+            // Integrity headers must cover the *decoded* payload the server will store
             const buf = await blob.arrayBuffer();
             const u8 = new Uint8Array(buf);
             if (requireChunkCrc32) headers['X-Chunk-CRC32'] = crc32Hex(u8);
             if (requireChunkSha256) headers['X-Chunk-SHA256'] = await sha256HexOfBuffer(u8);
             body = buf;
+        } else {
+            const c = await maybeCompressChunk(blob, fileMime);
+            body = c.body;
+            if (c.encoding) headers['Content-Encoding'] = c.encoding;
         }
 
         const r = await fetch(`${apiBase}/api/uploads/${uploadId}/chunk/${index}`, {
-            method: 'PUT',
+            ...fetchOpts,
             headers,
             body
         });
@@ -342,6 +372,7 @@ window.uploaderInit = function (apiBase, apiKey) {
         const r = await fetch(`${apiBase}/api/uploads/${uploadId}/complete`, {
             method: 'POST',
             headers: authHeaders(),
+            keepalive: true,
             body: fd
         });
         const body = await r.json().catch(() => ({}));
@@ -413,6 +444,8 @@ window.uploaderInit = function (apiBase, apiKey) {
         const avg = recentMbps.reduce((a, b) => a + b, 0) / recentMbps.length;
         if (avg > 20 && adaptiveWorkers < MAX_WORKERS_CAP) adaptiveWorkers++;
         else if (avg < 4 && adaptiveWorkers > MIN_WORKERS) adaptiveWorkers--;
+        // Low throughput → try compressing chunks; high throughput → raw is faster (CPU bound otherwise)
+        compressionEnabled = avg < 8;
     }
 
     async function runUpload(file, uploadId, totalChunks, checksum, alreadyReceived) {
@@ -474,7 +507,7 @@ window.uploaderInit = function (apiBase, apiKey) {
                 if (!item) return;
                 try {
                     const blob = file.slice(item.start, item.end);
-                    await apiUploadChunk(uploadId, item.index, blob);
+                    await apiUploadChunk(uploadId, item.index, blob, file.type);
                     received.add(item.index);
                     uploadedCount++;
                     noteBytes(item.end - item.start);
