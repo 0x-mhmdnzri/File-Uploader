@@ -60,6 +60,8 @@ try
         builder.Configuration.GetSection(AuthOptions.SectionName));
     builder.Services.Configure<RabbitMqOptions>(
         builder.Configuration.GetSection(RabbitMqOptions.SectionName));
+    builder.Services.Configure<BlobNodeOptions>(
+        builder.Configuration.GetSection(BlobNodeOptions.SectionName));
     builder.Services.Configure<RedisOptions>(
         builder.Configuration.GetSection(RedisOptions.SectionName));
     builder.Services.Configure<MultiInstanceOptions>(
@@ -115,6 +117,38 @@ try
         builder.Services.AddSingleton<IFileStorage, S3FileStorage>();
     else
         builder.Services.AddSingleton<IFileStorage, FileSystemStorage>();
+
+    // Owned blob nodes scaffold (perf 4.1) — see docs/OWNED-BLOB-NODES.md
+    // When Enabled, registers IBlobNodeResolver + HTTP clients. FileSystem remains default
+    // product plane until BlobNodeFileStorage adapter is wired.
+    {
+        var blobOpts = builder.Configuration.GetSection(BlobNodeOptions.SectionName).Get<WebApi.Options.BlobNodeOptions>()
+                       ?? new WebApi.Options.BlobNodeOptions();
+        if (blobOpts.Enabled && blobOpts.Nodes.Count > 0)
+        {
+            foreach (var n in blobOpts.Nodes)
+            {
+                var captured = n;
+                builder.Services.AddHttpClient(captured.Id, http =>
+                {
+                    http.BaseAddress = new Uri(captured.BaseUrl.TrimEnd('/') + "/");
+                    http.Timeout = TimeSpan.FromMinutes(30);
+                });
+            }
+            builder.Services.AddSingleton<WebApi.Storages.IBlobNodeResolver>(sp =>
+            {
+                var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<WebApi.Options.BlobNodeOptions>>().Value;
+                var factory = sp.GetRequiredService<System.Net.Http.IHttpClientFactory>();
+                var clients = opts.Nodes
+                    .Select(n => (WebApi.Interfaces.IBlobNodeClient)new WebApi.Storages.HttpBlobNodeClient(
+                        factory.CreateClient(n.Id), n.Id, opts.ServiceToken))
+                    .ToList();
+                return new WebApi.Storages.BlobNodeResolver(
+                    clients,
+                    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<WebApi.Options.BlobNodeOptions>>());
+            });
+        }
+    }
 
     // Caches: Redis when Redis:ConnectionString is set (perf 4.4), else in-process
     var redisCs = builder.Configuration.GetSection(RedisOptions.SectionName)["ConnectionString"];
