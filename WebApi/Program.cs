@@ -1,3 +1,5 @@
+using StackExchange.Redis;
+using WebApi.Options;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -58,6 +60,8 @@ try
         builder.Configuration.GetSection(AuthOptions.SectionName));
     builder.Services.Configure<RabbitMqOptions>(
         builder.Configuration.GetSection(RabbitMqOptions.SectionName));
+    builder.Services.Configure<RedisOptions>(
+        builder.Configuration.GetSection(RedisOptions.SectionName));
     builder.Services.Configure<MultiInstanceOptions>(
         builder.Configuration.GetSection(MultiInstanceOptions.SectionName));
 
@@ -112,13 +116,25 @@ try
     else
         builder.Services.AddSingleton<IFileStorage, FileSystemStorage>();
 
-    builder.Services.AddSingleton<IReceivedChunkCache, ReceivedChunkCache>();
-    builder.Services.AddSingleton<ISessionCache>(sp =>
+    // Caches: Redis when Redis:ConnectionString is set (perf 4.4), else in-process
+    var redisCs = builder.Configuration.GetSection(RedisOptions.SectionName)["ConnectionString"];
+    if (!string.IsNullOrWhiteSpace(redisCs))
     {
-        var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<StorageOptions>>().Value;
-        var ttl = TimeSpan.FromSeconds(Math.Max(5, opts.SessionCacheTtlSeconds));
-        return new SessionCache(ttl);
-    });
+        builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
+            ConnectionMultiplexer.Connect(redisCs));
+        builder.Services.AddSingleton<ISessionCache, RedisSessionCache>();
+        builder.Services.AddSingleton<IReceivedChunkCache, RedisReceivedChunkCache>();
+    }
+    else
+    {
+        builder.Services.AddSingleton<IReceivedChunkCache, ReceivedChunkCache>();
+        builder.Services.AddSingleton<ISessionCache>(sp =>
+        {
+            var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<WebApi.Storages.StorageOptions>>().Value;
+            var ttl = TimeSpan.FromSeconds(Math.Max(5, opts.SessionCacheTtlSeconds));
+            return new SessionCache(ttl);
+        });
+    }
     builder.Services.AddSingleton<IAuditLogger, SerilogAuditLogger>();
     builder.Services.AddScoped<IUploadService, UploadService>();
     builder.Services.AddSingleton<IUploadMetrics, UploadMetrics>();
