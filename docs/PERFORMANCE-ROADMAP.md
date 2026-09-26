@@ -35,12 +35,12 @@ Key knobs already present in `StorageOptions`:
 
 ## 1. Server Complete / Merge / Hash path (highest impact on perceived latency)
 
-- [ ] **1.1 Config tuning of IO limits**  
+- [x] **1.1 Config tuning of IO limits**  
   Raise `MaxConcurrentDiskIo` and `MergeParallelism` according to real hardware (NVMe local vs NFS).  
   Re-run StorageBench and document winners in `docs/BENCH.md`.  
   *Effort: low · Risk: low*
 
-- [ ] **1.2 Larger IO & hash buffers**  
+- [x] **1.2 Larger IO & hash buffers**  
   Move `BufferSize` in `FileSystemStorage` from 1 MB → 4–8 MB.  
   Keep 4 MB (or larger) in both `HardwareSha256FileHasher` and `Sha256FileHasher`.  
   *Effort: low · Risk: low (watch memory under high concurrency)*
@@ -78,7 +78,7 @@ Key knobs already present in `StorageOptions`:
   Improve `IReceivedChunkCache` hit-rate / TTL; consider a short-lived `ConcurrentDictionary` with sliding expiration.  
   *Effort: low · Risk: low*
 
-- [ ] **2.4 Pre-create part directory on Initiate**  
+- [x] **2.4 Pre-create part directory on Initiate**  
   Move `Directory.CreateDirectory(PartDir)` out of the hot PUT path.  
   *Effort: trivial · Risk: none*
 
@@ -148,7 +148,7 @@ Key knobs already present in `StorageOptions`:
 
 ## Suggested first three PRs
 
-1. **Config + buffer tuning** (1.1 + 1.2 + 2.4) — pure config / small code, easy to measure.
+1. ~~**Config + buffer tuning** (1.1 + 1.2 + 2.4)~~ — **done** (2026-09-26).
 2. **Client worker improvements** (3.1 + 3.4).
 3. **Async Complete** (1.4) — biggest perceived latency win.
 
