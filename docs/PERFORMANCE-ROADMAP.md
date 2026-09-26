@@ -90,11 +90,11 @@ Key knobs already present in `StorageOptions`:
   Raise max workers from 6 → 12–16 and improve the throughput/RTT adaptive logic.  
   *Effort: low–medium · Risk: low (server must tolerate the extra concurrency)*
 
-- [ ] **3.2 Better HTTP/2 / connection usage**  
+- [x] **3.2 Better HTTP/2 / connection usage** — fetch keepalive on chunk/initiate/complete  
   Ensure the browser can fully utilise HTTP/2 multiplexing (or controlled multiple connections).  
   *Effort: medium · Risk: low*
 
-- [ ] **3.3 Adaptive per-chunk compression**  
+- [x] **3.3 Adaptive per-chunk compression** — gzip via CompressionStream when MB/s low; skip already-compressed MIME  
   Only enable gzip/br when CPU is free and measured bandwidth is the bottleneck.  
   *Effort: low · Risk: low*
 
