@@ -112,8 +112,15 @@ try
     else
         builder.Services.AddSingleton<IFileHasher, HardwareSha256FileHasher>();
 
+    var blobEnabled = builder.Configuration.GetSection(BlobNodeOptions.SectionName).GetValue<bool>("Enabled");
     var provider = builder.Configuration.GetSection(StorageOptions.SectionName)["Provider"] ?? "FileSystem";
-    if (string.Equals(provider, "S3", StringComparison.OrdinalIgnoreCase))
+    if (blobEnabled)
+    {
+        // Product plane = owned blob nodes (perf 4.1). Requires BlobNodes:Nodes non-empty
+        // and IBlobNodeResolver registration below.
+        builder.Services.AddSingleton<IFileStorage, BlobNodeFileStorage>();
+    }
+    else if (string.Equals(provider, "S3", StringComparison.OrdinalIgnoreCase))
         builder.Services.AddSingleton<IFileStorage, S3FileStorage>();
     else
         builder.Services.AddSingleton<IFileStorage, FileSystemStorage>();
