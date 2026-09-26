@@ -45,7 +45,7 @@ Key knobs already present in `StorageOptions`:
   Keep 4 MB (or larger) in both `HardwareSha256FileHasher` and `Sha256FileHasher`.  
   *Effort: low · Risk: low (watch memory under high concurrency)*
 
-- [ ] **1.3 Memory-mapped merge**  
+- [x] **1.3 Memory-mapped merge**  
   For the parallel merge path, consider `MemoryMappedFile` + parallel writes instead of many small `FileStream`s.  
   Especially useful when `SinglePassMergeAndHash = false`.  
   *Effort: medium · Risk: medium (platform differences)*
