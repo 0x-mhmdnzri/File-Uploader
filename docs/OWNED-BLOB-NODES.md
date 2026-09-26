@@ -1,6 +1,6 @@
 # D8 — Owned blob nodes (design)
 
-Status: **scaffolding started** (perf 4.1) — `IBlobNodeClient`, `HttpBlobNodeClient`, `IBlobNodeResolver`, config `BlobNodes`. Full `IFileStorage` adapter + standalone blob-node host still TODO. Product plane today = shared filesystem volume (P4.2). This document is the next evolution when NFS/EFS becomes the bottleneck or ops constraint.
+Status: **API adapter landed** (perf 4.1) — `BlobNodeFileStorage` implements `IFileStorage` via blob nodes; client/resolver/config present. **Standalone blob-node host process still TODO** (nodes must expose `/v1/objects` API). Product plane today = shared filesystem volume (P4.2). This document is the next evolution when NFS/EFS becomes the bottleneck or ops constraint.
 
 ## Goal
 
