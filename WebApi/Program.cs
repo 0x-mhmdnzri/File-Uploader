@@ -180,6 +180,14 @@ try
         var storage = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<StorageOptions>>().Value;
         var guardLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("MultiInstance");
         MultiInstanceStartupGuard.ValidateOrThrow(mi, storage, dbProvider, guardLogger);
+
+        // Integrity policy (perf 1.5): warn loudly when full-file SHA is disabled
+        if (!storage.AlwaysComputeFullChecksum)
+        {
+            guardLogger.LogWarning(
+                "StorageOptions.AlwaysComputeFullChecksum=false — server will skip full-file SHA-256 " +
+                "unless the client sends a checksum. Lab/benchmark only; do NOT use in production.");
+        }
     }
 
     using (var scope = app.Services.CreateScope())
