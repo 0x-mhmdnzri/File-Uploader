@@ -4,6 +4,12 @@ public interface IFileStorage
 {
     Task EnsureDirectoriesAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// Pre-create the per-upload temp/part directory so the first chunk PUT
+    /// does not pay the Directory.CreateDirectory cost on the hot path.
+    /// </summary>
+    Task EnsureSessionDirectoriesAsync(Guid uploadId, CancellationToken ct = default);
+
     Task SaveChunkAsync(Guid uploadId, int chunkIndex, Stream data, CancellationToken ct = default);
 
     Task DeleteChunkAsync(Guid uploadId, int chunkIndex, CancellationToken ct = default);
