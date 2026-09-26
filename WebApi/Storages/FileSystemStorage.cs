@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Threading;
+using System.IO.Pipelines;
 using System.IO.MemoryMappedFiles;
 using Microsoft.Extensions.Options;
 using WebApi.Interfaces;
@@ -76,6 +77,58 @@ public sealed class FileSystemStorage : IFileStorage, IDisposable
                 }
 
                 await fs.FlushAsync(ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        finally
+        {
+            _diskGate.Release();
+        }
+    }
+
+    public async Task SaveChunkAsync(Guid uploadId, int chunkIndex, PipeReader reader, CancellationToken ct = default)
+    {
+        await _diskGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // Part directory is pre-created in EnsureSessionDirectoriesAsync (called from Initiate)
+            var filePath = PartPath(uploadId, chunkIndex);
+
+            var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+            try
+            {
+                await using var fs = new FileStream(
+                    filePath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: BufferSize,
+                    options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+                while (true)
+                {
+                    var result = await reader.ReadAsync(ct).ConfigureAwait(false);
+                    var bufferRead = result.Buffer;
+
+                    if (bufferRead.IsEmpty && result.IsCompleted)
+                        break;
+
+                    foreach (var segment in bufferRead)
+                    {
+                        await fs.WriteAsync(segment, ct).ConfigureAwait(false);
+                    }
+
+                    reader.AdvanceTo(bufferRead.End);
+
+                    if (result.IsCompleted)
+                        break;
+                }
+
+                await fs.FlushAsync(ct).ConfigureAwait(false);
+                await reader.CompleteAsync().ConfigureAwait(false);
             }
             finally
             {
